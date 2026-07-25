@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import urllib.error
 import urllib.request
 from typing import Any, Iterable
 
@@ -491,11 +492,22 @@ def default_tag_from_github_env() -> str | None:
 
 
 def fetch_pypi_versions(package: str) -> set[str]:
-    """Return released versions for ``package`` from the public PyPI JSON API."""
+    """Return released versions for ``package`` from the public PyPI JSON API.
+
+    PyPI answers 404 for a project that has never published a release, which is
+    the expected state for a first publish. Treat that as an empty release set
+    so the duplicate-version check stays meaningful instead of failing the
+    debut release.
+    """
 
     url = f"https://pypi.org/pypi/{package}/json"
-    with urllib.request.urlopen(url, timeout=20) as response:  # noqa: S310 - fixed PyPI HTTPS endpoint
-        payload = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(url, timeout=20) as response:  # noqa: S310 - fixed PyPI HTTPS endpoint
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return set()
+        raise
     releases = payload.get("releases", {})
     if not isinstance(releases, dict):
         raise ReleaseVersionError(f"PyPI response for {package!r} is missing releases")

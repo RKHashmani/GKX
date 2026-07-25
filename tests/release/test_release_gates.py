@@ -1031,6 +1031,7 @@ from tools.release.check_release_readiness import (
     ReleaseVersionError,
     build_technical_release_status,
     default_tag_from_github_env,
+    fetch_pypi_versions,
     normalize_tag,
     read_project_version,
     read_source_version,
@@ -1099,6 +1100,39 @@ def test_release_version_rejects_duplicate_pypi_version(tmp_path: Path) -> None:
         validate_release_version(
             root=tmp_path, tag="v2.0.1", require_tag=True, pypi_versions={"2.0.1"}
         )
+
+
+def test_fetch_pypi_versions_treats_unpublished_project_as_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A never-published project answers 404 and must not fail the first release."""
+
+    import urllib.error
+    import urllib.request
+
+    def raise_not_found(url: str, timeout: float = 0.0) -> None:
+        raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_not_found)
+
+    assert fetch_pypi_versions("gkx") == set()
+
+
+def test_fetch_pypi_versions_propagates_non_404_http_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real PyPI outages must not be mistaken for an unpublished project."""
+
+    import urllib.error
+    import urllib.request
+
+    def raise_server_error(url: str, timeout: float = 0.0) -> None:
+        raise urllib.error.HTTPError(url, 503, "Service Unavailable", None, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_server_error)
+
+    with pytest.raises(urllib.error.HTTPError):
+        fetch_pypi_versions("gkx")
 
 
 def test_release_version_readers_and_tag_normalization(tmp_path: Path) -> None:
