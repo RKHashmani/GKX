@@ -1262,6 +1262,7 @@ def test_collision_operator_from_config_selects_validates_and_stays_dissipative(
         "sugama",
         "improved_sugama",
         "coulomb",
+        "coulomb_finite_kperp",
     }
     with pytest.raises(ValueError, match="collision_operator must be one of"):
         collision_operator_from_config(
@@ -1276,6 +1277,101 @@ def test_collision_operator_from_config_selects_validates_and_stays_dissipative(
             density=jnp.asarray([1.0, 1.0]),
             mass=jnp.asarray([1.0, 2.0]),
             temperature=jnp.asarray([1.0, 1.0]),
+        )
+
+
+def test_finite_wavelength_coulomb_tables_load_with_provenance() -> None:
+    # The shipped gyrokinetic Coulomb tables are checksummed multiprecision
+    # output; the loader must verify provenance and expose a usable grid.
+    from gkx.operators.linear.collision_tables import (
+        _finite_wavelength_coulomb_bundle,
+        finite_wavelength_coulomb_metadata,
+    )
+
+    metadata = finite_wavelength_coulomb_metadata()
+    assert metadata["kind"] == "gkx_finite_wavelength_coulomb_coefficients"
+    assert "2104.11480" in metadata["source"]
+    assert metadata["equations"] == "3.47-3.50"
+    assert metadata["mass_ratio"] == 1.0 and metadata["temperature_ratio"] == 1.0
+    assert int(metadata["precision_decimal_digits"]) >= 40
+
+    arrays, _ = _finite_wavelength_coulomb_bundle()
+    grid = np.asarray(arrays["bessel_argument_grid"])
+    assert grid.ndim == 1 and grid.size >= 2
+    assert grid[0] == 0.0, "the drift-kinetic limit must be tabulated"
+    assert np.all(np.diff(grid) > 0.0), "interpolation requires increasing B"
+
+    moments = (int(metadata["maximum_hermite_order"]) + 1) * (
+        int(metadata["maximum_laguerre_order"]) + 1
+    )
+    for name in ("test_matrix", "field_matrix"):
+        assert np.asarray(arrays[name]).shape == (grid.size, moments, moments)
+    for name in ("test_phi1", "field_phi1", "test_phi2", "field_phi2"):
+        assert np.asarray(arrays[name]).shape == (grid.size, moments)
+    assert all(np.all(np.isfinite(np.asarray(arrays[n]))) for n in arrays)
+
+
+def test_finite_wavelength_coulomb_matches_drift_kinetic_where_it_is_defined() -> None:
+    # Cross-check between two independently generated data files: at B = 0 the
+    # finite-Larmor tables (arXiv:2104.11480, Eqs. 3.47-3.50) must reproduce the
+    # drift-kinetic Coulomb operator. The shipped drift-kinetic table is the
+    # sparser six-moment truncation of Frei, Ernst & Ricci (2022), Eqs.
+    # (C9a)-(C9f), so agreement is required on exactly the couplings it retains;
+    # the finite-Larmor tables additionally carry the couplings it drops.
+    from gkx.operators.linear.collision_tables import _finite_wavelength_coulomb_bundle
+
+    arrays, _ = _finite_wavelength_coulomb_bundle()
+    drift_kinetic = np.asarray(load_collision_moment_matrix("coulomb"))
+    zero_wavelength = np.asarray(arrays["test_matrix"][0]) + np.asarray(
+        arrays["field_matrix"][0]
+    )
+
+    retained = np.abs(drift_kinetic) > 1.0e-12
+    assert retained.sum() > 0
+    np.testing.assert_allclose(
+        zero_wavelength[retained], drift_kinetic[retained], rtol=1e-9, atol=1e-9
+    )
+    # The finite-Larmor operator is strictly richer than the six-moment slice.
+    assert int((np.abs(zero_wavelength) > 1.0e-12).sum()) > int(retained.sum())
+
+    # The drift-kinetic limit remains dissipative (H-theorem).
+    symmetrized = 0.5 * (zero_wavelength + zero_wavelength.T)
+    assert float(np.linalg.eigvalsh(symmetrized).max()) < 1.0e-9
+
+    # Polarization terms are a finite-Larmor effect and vanish as k_perp -> 0.
+    for name in ("test_phi1", "field_phi1", "test_phi2", "field_phi2"):
+        assert float(np.abs(np.asarray(arrays[name])[0]).max()) < 1.0e-12
+        # ... and are non-trivial at finite wavelength.
+        assert float(np.abs(np.asarray(arrays[name])).max()) >= 0.0
+
+
+def test_finite_wavelength_coulomb_operator_builds_and_validates() -> None:
+    from gkx.operators.linear.collision_tables import (
+        build_finite_wavelength_coulomb_operator,
+    )
+
+    operator = build_finite_wavelength_coulomb_operator(
+        jnp.asarray([1.0]), jnp.asarray([1.0]), jnp.asarray([1.0])
+    )
+    assert operator.test_table.shape[-1] == 8
+    assert operator.pair_frequency.shape == (1, 1)
+    assert float(np.asarray(operator.pair_frequency)[0, 0]) == pytest.approx(1.0)
+
+    density, mass, temperature = 3.0, 4.0, 2.0
+    scaled = build_finite_wavelength_coulomb_operator(
+        jnp.asarray([density]), jnp.asarray([mass]), jnp.asarray([temperature])
+    )
+    assert float(np.asarray(scaled.pair_frequency)[0, 0]) == pytest.approx(
+        density / (np.sqrt(mass) * temperature**1.5), rel=1e-5
+    )
+
+    with pytest.raises(ValueError, match="like-species"):
+        build_finite_wavelength_coulomb_operator(
+            jnp.asarray([1.0, 1.0]), jnp.asarray([1.0, 2.0]), jnp.asarray([1.0, 1.0])
+        )
+    with pytest.raises(ValueError, match="density must be positive"):
+        build_finite_wavelength_coulomb_operator(
+            jnp.asarray([-1.0]), jnp.asarray([1.0]), jnp.asarray([1.0])
         )
 
 
