@@ -1230,7 +1230,7 @@ def test_collision_operator_from_config_selects_validates_and_stays_dissipative(
         is None
     )
 
-    for name in ("sugama", "improved_sugama"):
+    for name in ("sugama", "improved_sugama", "coulomb"):
         operator = collision_operator_from_config(
             name, density=density, mass=mass, temperature=temperature
         )
@@ -1244,16 +1244,75 @@ def test_collision_operator_from_config_selects_validates_and_stays_dissipative(
         assert float(eigenvalues.max()) < 1.0e-6, name
         assert float(eigenvalues.min()) < -0.1, name
 
+    # The three moment models are physically distinct operators.
+    matrices = {
+        name: np.asarray(
+            collision_operator_from_config(
+                name, density=density, mass=mass, temperature=temperature
+            ).matrix
+        )
+        for name in ("sugama", "improved_sugama", "coulomb")
+    }
+    assert not np.allclose(matrices["coulomb"], matrices["sugama"])
+    assert not np.allclose(matrices["coulomb"], matrices["improved_sugama"])
+
     assert set(COLLISION_OPERATOR_NAMES) == {
         "none",
         "lenard_bernstein",
         "sugama",
         "improved_sugama",
+        "coulomb",
     }
     with pytest.raises(ValueError, match="collision_operator must be one of"):
         collision_operator_from_config(
             "bogus", density=density, mass=mass, temperature=temperature
         )
+
+    # The tabulated Coulomb table is a like-species vertical slice; a
+    # multispecies request must be refused rather than silently extrapolated.
+    with pytest.raises(ValueError, match="like-species"):
+        collision_operator_from_config(
+            "coulomb",
+            density=jnp.asarray([1.0, 1.0]),
+            mass=jnp.asarray([1.0, 2.0]),
+            temperature=jnp.asarray([1.0, 1.0]),
+        )
+
+
+def test_drift_kinetic_coulomb_matrix_scales_with_collision_frequency() -> None:
+    # The tabulated coefficients are normalized to unit frequency and must be
+    # scaled by the same dimensionless nu_aa = n / (sqrt(m) T**1.5) that the
+    # Sugama assemblers use, so all three drift-kinetic models share one
+    # normalization.
+    from gkx.operators.linear.collision_tables import (
+        assemble_drift_kinetic_coulomb_matrix,
+    )
+
+    unit = assemble_drift_kinetic_coulomb_matrix(
+        jnp.asarray([1.0]), jnp.asarray([1.0]), jnp.asarray([1.0])
+    )
+    assert np.allclose(
+        np.asarray(unit).reshape(8, 8),
+        np.asarray(load_collision_moment_matrix("coulomb")),
+        atol=1e-6,
+    )
+
+    density, mass, temperature = 3.0, 4.0, 2.0
+    scaled = assemble_drift_kinetic_coulomb_matrix(
+        jnp.asarray([density]), jnp.asarray([mass]), jnp.asarray([temperature])
+    )
+    expected = density / (np.sqrt(mass) * temperature**1.5)
+    assert np.allclose(np.asarray(scaled), expected * np.asarray(unit), rtol=1e-5)
+
+    for bad in ("density", "mass", "temperature"):
+        values = {
+            "density": jnp.asarray([1.0]),
+            "mass": jnp.asarray([1.0]),
+            "temperature": jnp.asarray([1.0]),
+        }
+        values[bad] = jnp.asarray([-1.0])
+        with pytest.raises(ValueError, match=f"{bad} must be positive"):
+            assemble_drift_kinetic_coulomb_matrix(**values)
 
 
 def test_improved_sugama_multispecies_matrix_conserves_and_differentiates() -> None:
