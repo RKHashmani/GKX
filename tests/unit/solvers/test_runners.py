@@ -1,5 +1,7 @@
 """Config-driven runner tests."""
 
+import dataclasses
+
 import jax.numpy as jnp
 import pytest
 
@@ -128,4 +130,83 @@ def test_integrate_nonlinear_from_config_rejects_ungated_z_state_sharding():
     G = jnp.zeros((2, 2, cfg.grid.Ny, cfg.grid.Nx, cfg.grid.Nz), dtype=jnp.complex64)
 
     with pytest.raises(ValueError, match="z FFT axis"):
+        integrate_nonlinear_from_config(G, grid, geom, params, cfg.time)
+
+
+def test_integrate_linear_from_config_applies_selected_collision_operator():
+    """A selected moment operator must change the linear evolution."""
+
+    grid_cfg = GridConfig(Nx=1, Ny=4, Nz=8, Lx=6.0, Ly=6.0)
+    cfg = CycloneBaseCase(
+        grid=grid_cfg,
+        time=TimeConfig(t_max=0.4, dt=0.05, method="rk2", use_diffrax=False),
+    )
+    grid = build_spectral_grid(cfg.grid)
+    geom = SAlphaGeometry.from_config(cfg.geometry)
+    params = LinearParams(nu=0.05)
+
+    def evolve(name):
+        time_cfg = dataclasses.replace(cfg.time, collision_operator=name)
+        # Nl * Nm must match the tabulated eight-moment drift-kinetic matrix.
+        G = jnp.zeros(
+            (4, 2, cfg.grid.Ny, cfg.grid.Nx, cfg.grid.Nz), dtype=jnp.complex128
+        )
+        G = G.at[0, 0, 1, 0, :].set(1.0e-3)
+        return integrate_linear_from_config(G, grid, geom, params, time_cfg)[0]
+
+    baseline = evolve("lenard_bernstein")
+    sugama = evolve("sugama")
+    improved = evolve("improved_sugama")
+
+    # "none" and "lenard_bernstein" both keep the built-in diagonal term.
+    assert jnp.allclose(baseline, evolve("none"))
+    # Each moment operator replaces that term, so all three must differ.
+    assert not jnp.allclose(baseline, sugama)
+    assert not jnp.allclose(baseline, improved)
+    assert not jnp.allclose(sugama, improved)
+    assert jnp.all(jnp.isfinite(sugama)) and jnp.all(jnp.isfinite(improved))
+
+
+def test_integrate_linear_from_config_reports_moment_basis_mismatch():
+    """A basis the tabulated matrix cannot act on must fail with guidance."""
+
+    grid_cfg = GridConfig(Nx=1, Ny=4, Nz=8, Lx=6.0, Ly=6.0)
+    cfg = CycloneBaseCase(
+        grid=grid_cfg,
+        time=TimeConfig(
+            t_max=0.2,
+            dt=0.1,
+            method="rk2",
+            use_diffrax=False,
+            collision_operator="sugama",
+        ),
+    )
+    grid = build_spectral_grid(cfg.grid)
+    geom = SAlphaGeometry.from_config(cfg.geometry)
+    params = LinearParams(nu=0.05)
+    G = jnp.zeros((3, 3, cfg.grid.Ny, cfg.grid.Nx, cfg.grid.Nz), dtype=jnp.complex128)
+
+    with pytest.raises(ValueError, match="8-moment"):
+        integrate_linear_from_config(G, grid, geom, params, cfg.time)
+
+
+def test_config_collision_operator_rejects_unsupported_solver_paths():
+    """Unsupported paths must raise instead of silently ignoring the setting."""
+
+    grid_cfg = GridConfig(Nx=1, Ny=4, Nz=8, Lx=6.0, Ly=6.0)
+    cfg = CycloneBaseCase(
+        grid=grid_cfg,
+        time=TimeConfig(
+            t_max=0.2, dt=0.1, method="rk2", use_diffrax=True,
+            collision_operator="sugama",
+        ),
+    )
+    grid = build_spectral_grid(cfg.grid)
+    geom = SAlphaGeometry.from_config(cfg.geometry)
+    params = LinearParams(nu=0.05)
+    G = jnp.zeros((4, 2, cfg.grid.Ny, cfg.grid.Nx, cfg.grid.Nz), dtype=jnp.complex128)
+
+    with pytest.raises(NotImplementedError, match="diffrax linear"):
+        integrate_linear_from_config(G, grid, geom, params, cfg.time)
+    with pytest.raises(NotImplementedError, match="diffrax nonlinear"):
         integrate_nonlinear_from_config(G, grid, geom, params, cfg.time)
