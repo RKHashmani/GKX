@@ -1,0 +1,166 @@
+"""Physics gate: collisional invariants of every shipped collision operator.
+
+A linearized collision operator must annihilate the collisional invariants. In
+the Hermite-Laguerre moment basis with Hermite-major index ``p*(J+1)+j`` these
+are left null vectors of the moment matrix ``C``, because the production of a
+moment functional ``v`` is ``v^T C N``:
+
+===================  ==================  ==============================
+invariant            moment ``(p, j)``   vector
+===================  ==================  ==============================
+density              ``(0, 0)``          ``e_0``
+parallel momentum    ``(1, 0)``          ``e_2``
+energy               ``(0, 1)``/``(2,0)``  ``e_1 + e_4/sqrt(2)``
+===================  ==================  ==============================
+
+The energy combination is the exact null direction of the drift-kinetic
+matrices; the ``1/sqrt(2)`` weight is the perpendicular/parallel split of the
+Hermite-Laguerre energy moment.
+
+Two distinct statements are gated here, because they are physically different:
+
+Drift-kinetic operators (``sugama``, ``improved_sugama``, ``coulomb``) act on
+the zero-Larmor-radius limit where gyrocenter and particle moments coincide, so
+all three invariants must be conserved to machine precision.
+
+The finite-Larmor Coulomb operator acts on *gyrocenter* moments, whose
+conservation is modified by gyroaveraging at finite perpendicular wavelength.
+The defect must vanish as ``b -> 0`` and enter at first order in
+``b = B^2/2``, which is the FLR ordering of the underlying expansion. A defect
+growing faster or slower than ``B^2`` would mean the finite-Larmor kernels were
+assembled at the wrong order.
+"""
+
+from __future__ import annotations
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from gkx.operators.linear.collision_tables import _finite_wavelength_coulomb_bundle
+from gkx.operators.linear.collisions import (
+    assemble_drift_kinetic_improved_sugama_matrix,
+    assemble_drift_kinetic_sugama_matrix,
+    load_collision_moment_matrix,
+)
+
+MOMENT_COUNT = 8
+
+
+def conservation_tolerance() -> float:
+    """Return a tolerance matched to the ambient JAX precision.
+
+    The matrices are assembled in the working precision, so the invariant
+    production floor is set by cancellation there: ~1e-16 under x64 and ~1e-7
+    under the default float32 policy.
+    """
+
+    return 1.0e-12 if jnp.zeros(1).dtype == jnp.float64 else 1.0e-5
+
+
+def collisional_invariants() -> dict[str, np.ndarray]:
+    """Return the density, parallel-momentum, and energy moment functionals."""
+
+    basis = np.eye(MOMENT_COUNT)
+    return {
+        "density": basis[0],
+        "parallel_momentum": basis[2],
+        "energy": basis[1] + basis[4] / np.sqrt(2.0),
+    }
+
+
+def drift_kinetic_matrices() -> dict[str, np.ndarray]:
+    """Return the single-species drift-kinetic matrix of each model."""
+
+    density = jnp.asarray([1.0])
+    mass = jnp.asarray([1.0])
+    temperature = jnp.asarray([1.0])
+    return {
+        "sugama": np.asarray(
+            assemble_drift_kinetic_sugama_matrix(density, mass, temperature)
+        )[0, 0],
+        "improved_sugama": np.asarray(
+            assemble_drift_kinetic_improved_sugama_matrix(density, mass, temperature)
+        )[0, 0],
+        "coulomb": np.asarray(load_collision_moment_matrix("coulomb")),
+    }
+
+
+def finite_wavelength_matrix(index: int) -> np.ndarray:
+    """Return the like-species finite-Larmor matrix at one grid point."""
+
+    arrays, _ = _finite_wavelength_coulomb_bundle()
+    return np.asarray(arrays["test_matrix"][index]) + np.asarray(
+        arrays["field_matrix"][index]
+    )
+
+
+@pytest.mark.parametrize("model", ["sugama", "improved_sugama", "coulomb"])
+def test_drift_kinetic_operators_conserve_all_invariants(model: str) -> None:
+    """Density, parallel momentum, and energy are exact drift-kinetic invariants."""
+
+    matrix = drift_kinetic_matrices()[model]
+    for name, functional in collisional_invariants().items():
+        production = np.abs(functional @ matrix).max()
+        assert production < conservation_tolerance(), (
+            f"{model} does not conserve {name}: {production:.3e}"
+        )
+
+
+@pytest.mark.parametrize("model", ["sugama", "improved_sugama", "coulomb"])
+def test_drift_kinetic_operators_are_dissipative(model: str) -> None:
+    """The H-theorem requires a negative-semidefinite symmetrized operator."""
+
+    matrix = drift_kinetic_matrices()[model]
+    eigenvalues = np.linalg.eigvalsh(0.5 * (matrix + matrix.T))
+    assert float(eigenvalues.max()) < conservation_tolerance(), model
+    # The operator must actually dissipate, not merely fail to grow.
+    assert float(eigenvalues.min()) < -0.1, model
+
+
+def test_finite_larmor_coulomb_conserves_invariants_at_zero_wavelength() -> None:
+    """At b = 0 the gyrocenter and particle moments coincide, so conservation is exact."""
+
+    _, metadata = _finite_wavelength_coulomb_bundle()
+    assert metadata["bessel_argument_grid"][0] == 0.0
+    matrix = finite_wavelength_matrix(0)
+    for name, functional in collisional_invariants().items():
+        production = np.abs(functional @ matrix).max()
+        assert production < conservation_tolerance(), (
+            f"finite-Larmor b=0 breaks {name}: {production:.3e}"
+        )
+
+
+def test_finite_larmor_conservation_defect_is_first_order_in_b() -> None:
+    """The gyrocenter conservation defect must enter at first order in b = B^2/2.
+
+    This is the sharpest available check that the finite-Larmor kernels carry
+    the right order: a defect scaling as B^2 is linear in b, while a wrong
+    kernel assembly would show B^1 or B^4.
+    """
+
+    _, metadata = _finite_wavelength_coulomb_bundle()
+    grid = np.asarray(metadata["bessel_argument_grid"], dtype=float)
+    small = (grid > 0.0) & (grid <= 0.5)
+    assert small.sum() >= 3, "need several small-B points to fit an exponent"
+
+    for name, functional in collisional_invariants().items():
+        defect = np.array(
+            [
+                np.abs(functional @ finite_wavelength_matrix(index)).max()
+                for index in np.flatnonzero(small)
+            ]
+        )
+        assert np.all(defect > 0.0), f"{name} defect vanishes identically at finite b"
+        exponent = float(
+            np.polyfit(np.log(grid[small]), np.log(defect), 1)[0]
+        )
+        assert 1.8 <= exponent <= 2.2, f"{name} defect scales as B^{exponent:.3f}, not B^2"
+
+    # Monotone growth with wavelength: FLR corrections do not fortuitously cancel.
+    density = collisional_invariants()["density"]
+    defects = [
+        np.abs(density @ finite_wavelength_matrix(index)).max()
+        for index in range(int(small.sum()) + 1)
+    ]
+    assert np.all(np.diff(defects) > 0.0)
