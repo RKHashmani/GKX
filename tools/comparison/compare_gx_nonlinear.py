@@ -797,6 +797,25 @@ def _synth_kx(*, nx: int, delta_kx: float) -> np.ndarray:
     return (2.0 * np.pi / (2.0 * np.pi / float(delta_kx))) * idx
 
 
+def _gx_grid_convention(g_mu: jnp.ndarray, roots: jnp.ndarray) -> jnp.ndarray:
+    """Undo the ``exp(-x/2)`` GKX carries on quadrature-grid values.
+
+    ``laguerre_transform`` splits the Gauss-Laguerre weight evenly between the
+    two matrices for conditioning, so ``_laguerre_to_grid`` yields
+    ``exp(-x_j/2) g(x_j)``. GX stores the unsplit ``g(x_j)``. Every comparison
+    of a raw grid quantity against a GX dump has to remove the factor first;
+    quantities the two codes build the same way from ``roots`` (J0*phi, b) do
+    not.
+
+    Note the rescaling reintroduces exactly the dynamic range the split was
+    meant to avoid -- ``exp(x_max/2)`` is 5e16 at ``nl=16`` -- so the GX-side
+    convention, and hence this comparison, runs out of float32 by ``nl~32``.
+    """
+
+    scale = jnp.exp(0.5 * jnp.asarray(roots, dtype=jnp.float64))
+    return g_mu * scale[None, :, None, None, None, None].astype(g_mu.dtype)
+
+
 def _summary(label: str, ref: np.ndarray, test: np.ndarray) -> None:
     if ref.ndim != test.ndim:
         raise ValueError(
@@ -1517,7 +1536,9 @@ def run_terms(argv: list[str] | None = None) -> None:
         ky_grid_pad_ord, kx_grid_pad_ord = np.meshgrid(
             ky_vals_pad, kx_pad_ord, indexing="ij"
         )
-        g_mu = _laguerre_to_grid(jnp.asarray(g_np), cache.laguerre_to_grid)
+        g_mu = _gx_grid_convention(
+            _laguerre_to_grid(jnp.asarray(g_np), cache.laguerre_to_grid), roots_ref
+        )
         b_nyc = b_dump_local[None, ...] if b_dump_local is not None else b_nyc_local
         chi_phi = _laguerre_j0_field(
             jnp.asarray(phi_np.astype(np.complex64)),
@@ -1642,7 +1663,9 @@ def run_terms(argv: list[str] | None = None) -> None:
         b_nyc_ord,
         b_dump_ord,
     ) = _prepare_order_nyc(order)
-    g_mu_nyc = _laguerre_to_grid(jnp.asarray(g_nyc), cache.laguerre_to_grid)
+    g_mu_nyc = _gx_grid_convention(
+        _laguerre_to_grid(jnp.asarray(g_nyc), cache.laguerre_to_grid), roots_ref
+    )
     b_nyc = b_dump_ord[None, ...] if b_dump_ord is not None else b_nyc_ord
     if phi_pad is not None:
         phi_pad_ord = _apply_kx_order(phi_pad, order=order, kx_axis=-2)
@@ -1704,7 +1727,9 @@ def run_terms(argv: list[str] | None = None) -> None:
             b_nyc_ord,
             b_dump_ord,
         ) = _prepare_order_nyc(order)
-        g_mu_nyc = _laguerre_to_grid(jnp.asarray(g_nyc), cache.laguerre_to_grid)
+        g_mu_nyc = _gx_grid_convention(
+            _laguerre_to_grid(jnp.asarray(g_nyc), cache.laguerre_to_grid), roots_ref
+        )
         b_nyc = b_dump_ord[None, ...] if b_dump_ord is not None else b_nyc_ord
         if phi_pad is not None:
             phi_pad_ord = _apply_kx_order(phi_pad, order=order, kx_axis=-2)

@@ -165,7 +165,67 @@ Controls:
 Collisions
 ----------
 
-The implemented collisional model is a Lenard-Bernstein-style diagonal damping
+GKX ships five collision models, selected with the ``collision_operator`` key in
+the ``[time]`` section of a TOML input or through
+:func:`gkx.operators.linear.params.collision_operator_from_config`:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 40 38
+
+   * - ``collision_operator``
+     - Model
+     - Reference
+   * - ``none``, ``lenard_bernstein``
+     - Conserving diagonal Lenard-Bernstein/Dougherty relaxation
+     - built in, described below
+   * - ``sugama``
+     - Drift-kinetic Sugama, conservative by construction
+     - Frei, Ernst & Ricci (2022), Eqs. (C6a)--(C6f)
+   * - ``improved_sugama``
+     - Improved Sugama, corrected Pfirsch-Schlüter friction
+     - Sugama et al. (2019); Frei, Ernst & Ricci (2022)
+   * - ``coulomb``
+     - Drift-kinetic linearized Coulomb (Landau)
+     - Frei, Ernst & Ricci (2022), Eqs. (C9a)--(C9f)
+   * - ``coulomb_finite_kperp``
+     - Gyrokinetic Coulomb retaining finite :math:`k_\perp`
+     - Frei, Ball, Hoffmann, Jorge, Ricci & Stenger (2021), Eqs. (3.47)--(3.50)
+
+``none`` and ``lenard_bernstein`` both keep the built-in diagonal term described
+in this section. The four moment operators *replace* that term with a dense
+Hermite-Laguerre matrix; the solver disables the diagonal contribution exactly
+when a moment operator is active, so collisions are never counted twice.
+
+Two constraints follow from the tabulated coefficients. The run's moment count
+``Nl*Nm`` must match a shipped table (8 or 18), and the operators run on the
+fixed-step cached integrator, so ``use_diffrax = false``. The diffrax, sharded,
+and Krylov eigenvalue paths raise rather than silently substituting the diagonal
+term. The Coulomb tables are generated at unit mass and temperature ratio, so a
+multispecies request is refused rather than extrapolated.
+
+Collision frequency
+^^^^^^^^^^^^^^^^^^^
+
+The tabulated matrices carry only the dimensionless pair scaling
+:math:`\nu_{ab} = n_b / (\sqrt{m_a}\,T_a^{3/2})`. The common collisionality
+prefactor is applied from the species ``nu``, so every model sits on the same
+collisionality axis as the built-in Lenard-Bernstein term.
+
+.. warning::
+
+   Three mutually incompatible normalizations of the collision frequency appear
+   in this literature. Writing
+   :math:`\nu = C\,n q^4 \ln\Lambda / (m^{1/2} T^{3/2})`, Sugama (2009, 2019)
+   uses :math:`C = 4.4429`, Frei et al. (2021) and Frei, Ernst & Ricci (2022)
+   use :math:`C = 2.3633`, and Frei, Hoffmann & Ricci (2022) use
+   :math:`C = 0.7523`. Any comparison against a published figure must fix the
+   convention first; it is the most common source of apparent agreement.
+
+Baseline Lenard-Bernstein model
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The built-in collisional model is a Lenard-Bernstein-style diagonal damping
 plus conservation-restoring low-order moment corrections.
 
 Base damping:
@@ -188,6 +248,77 @@ The code then reconstructs low moments:
 
 and a temperature-like correction :math:`\bar{T}` from ``m=0`` and ``m=2``.
 These are added back only into the ``m=0,1,2`` channels.
+
+Structural verification of the moment operators
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Every shipped matrix is asserted against the published closed forms, not only
+against internal consistency. All twelve Appendix-C coefficients of Frei, Ernst
+& Ricci (2022) reproduce, for example
+
+.. math::
+
+   C^{(1,1)}_{(1,1)} = -\frac{28}{15}\sqrt{\frac{2}{\pi}},
+   \qquad
+   C^{(3,0)}_{(1,1)} = -\frac{8}{5}\sqrt{\frac{1}{3\pi}} .
+
+GKX stores the opposite Laguerre sign convention to the paper, so a published
+entry maps onto the stored one through :math:`(-1)^{j+j'}`; that flips exactly
+the couplings between different Laguerre parities and leaves same-parity entries
+alone, which makes the comparison a check on the convention as well as on the
+values.
+
+The properties a linearized collision operator must satisfy are gated
+numerically in ``tests/validation/physics_gates/test_collision_conservation.py``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 46 54
+
+   * - Property
+     - Result
+   * - Density, parallel-momentum, energy conservation
+     - machine precision (:math:`\le 2.2\times10^{-16}`)
+   * - H-theorem, negative semidefinite symmetrized operator
+     - holds for every model
+   * - Onsager self-adjointness
+     - exact (:math:`\le 3.4\times10^{-17}`)
+   * - Published Appendix-C coefficients
+     - reproduce to :math:`10^{-12}`
+   * - Finite-Larmor :math:`b\to0` limit
+     - reduces to the drift-kinetic operator exactly
+   * - Finite-Larmor conservation defect
+     - :math:`B^{1.96}`--:math:`B^{1.99}`, first order in :math:`b`
+
+The invariants are the left null vectors of the moment matrix, since the
+production of a moment functional :math:`v` is :math:`v^{T} C N`. With
+Hermite-major index :math:`p(J+1)+j` they are :math:`e_0` (density), :math:`e_2`
+(parallel momentum), and :math:`e_1 + e_4/\sqrt{2}` (energy), the last read off
+the exact null space rather than assumed.
+
+The finite-Larmor operator acts on *gyrocenter* moments, whose conservation and
+plain self-adjointness are modified by gyroaveraging, so the ordering is the
+test: both defects must vanish at :math:`b=0` and enter at first order in
+:math:`b = B^2/2`. A kernel assembled at the wrong order would show
+:math:`B^{1}` or :math:`B^{4}` instead.
+
+Tabulated resolutions
+^^^^^^^^^^^^^^^^^^^^^
+
+Finite-Larmor tables ship at 8 and 18 Hermite-Laguerre moments, generated in
+60-digit arithmetic on a 14-point Bessel-argument grid
+:math:`B = k_\perp v_{\mathrm{th}}/\Omega \in [0, 4]` and stored as
+checksummed float64. The runtime interpolates at :math:`B=\sqrt{2b}` from the
+cached :math:`b`, so one table covers every perpendicular wavenumber, and it
+selects the table matching the run's ``Nl*Nm`` automatically.
+
+Published convergence studies ask for considerably more than eight moments --
+(16,8) for linear Cyclone-base-case ITG and (32,16) for the converged case -- so
+resolution should be scanned rather than assumed. Generate further resolutions
+with::
+
+    python tools/artifacts/build_finite_wavelength_coulomb_data.py \
+        --hermite 7 --laguerre 3 --digits 60 --workers 24 --check
 
 Claim boundary and extension plan
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

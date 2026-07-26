@@ -68,7 +68,12 @@ BLOCK_NAMES = (
 )
 
 
-def build_tables(digits: int, worker_count: int) -> tuple[np.ndarray, ...]:
+def build_tables(
+    digits: int,
+    worker_count: int,
+    hermite: int = MAXIMUM_HERMITE_ORDER,
+    laguerre: int = MAXIMUM_LAGUERRE_ORDER,
+) -> tuple[np.ndarray, ...]:
     """Generate the like-species ordered-pair blocks in multiprecision."""
 
     from build_linear_validation_artifacts import (
@@ -77,8 +82,8 @@ def build_tables(digits: int, worker_count: int) -> tuple[np.ndarray, ...]:
 
     return build_finite_wavelength_coulomb_pair_tables(
         BESSEL_ARGUMENTS,
-        MAXIMUM_HERMITE_ORDER,
-        MAXIMUM_LAGUERRE_ORDER,
+        hermite,
+        laguerre,
         mass_ratio=1.0,
         temperature_ratio=1.0,
         digits=digits,
@@ -105,7 +110,13 @@ def stack_blocks(blocks: tuple[np.ndarray, ...]) -> dict[str, np.ndarray]:
     return diagonals
 
 
-def write_artifacts(diagonals: dict[str, np.ndarray], digits: int) -> tuple[Path, Path]:
+def write_artifacts(
+    diagonals: dict[str, np.ndarray],
+    digits: int,
+    hermite: int = MAXIMUM_HERMITE_ORDER,
+    laguerre: int = MAXIMUM_LAGUERRE_ORDER,
+    stem: str = STEM,
+) -> tuple[Path, Path]:
     """Write the checksummed ``.npz``/``.json`` pair into the package data."""
 
     buffer = io.BytesIO()
@@ -122,8 +133,8 @@ def write_artifacts(diagonals: dict[str, np.ndarray], digits: int) -> tuple[Path
         "claim_scope": "validated_like_species_finite_larmor_coulomb",
         "bessel_argument": "B = k_perp v_th / Omega; runtime interpolates at sqrt(2 b)",
         "bessel_argument_grid": list(BESSEL_ARGUMENTS),
-        "maximum_hermite_order": MAXIMUM_HERMITE_ORDER,
-        "maximum_laguerre_order": MAXIMUM_LAGUERRE_ORDER,
+        "maximum_hermite_order": hermite,
+        "maximum_laguerre_order": laguerre,
         "moment_order": "hermite_major_index=p*(J+1)+j",
         "laguerre_convention": "gkx_signed_runtime",
         "mass_ratio": 1.0,
@@ -133,8 +144,8 @@ def write_artifacts(diagonals: dict[str, np.ndarray], digits: int) -> tuple[Path
         "shapes": {name: list(value.shape) for name, value in diagonals.items()},
         "sha256": hashlib.sha256(payload).hexdigest(),
     }
-    data_path = DATA_DIR / f"{STEM}.npz"
-    metadata_path = DATA_DIR / f"{STEM}.json"
+    data_path = DATA_DIR / f"{stem}.npz"
+    metadata_path = DATA_DIR / f"{stem}.json"
     data_path.write_bytes(payload)
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
     return data_path, metadata_path
@@ -145,19 +156,46 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--digits", type=int, default=60)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument(
+        "--hermite",
+        type=int,
+        default=MAXIMUM_HERMITE_ORDER,
+        help="maximum Hermite order P; the moment count is (P+1)*(J+1)",
+    )
+    parser.add_argument(
+        "--laguerre", type=int, default=MAXIMUM_LAGUERRE_ORDER, help="maximum Laguerre order J"
+    )
+    parser.add_argument(
+        "--stem",
+        type=str,
+        default=None,
+        help="output basename; defaults to the moment count for non-default orders",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="verify the b->0 limit against the drift-kinetic Coulomb matrices",
     )
     args = parser.parse_args(argv)
 
+    moments = (args.hermite + 1) * (args.laguerre + 1)
+    stem = args.stem
+    if stem is None:
+        stem = (
+            STEM
+            if (args.hermite, args.laguerre)
+            == (MAXIMUM_HERMITE_ORDER, MAXIMUM_LAGUERRE_ORDER)
+            else f"{STEM}_{moments}"
+        )
+
     start = time.time()
-    blocks = build_tables(args.digits, args.workers)
+    blocks = build_tables(args.digits, args.workers, args.hermite, args.laguerre)
     diagonals = stack_blocks(blocks)
-    data_path, metadata_path = write_artifacts(diagonals, args.digits)
+    data_path, metadata_path = write_artifacts(
+        diagonals, args.digits, args.hermite, args.laguerre, stem
+    )
     elapsed = time.time() - start
 
-    print(f"generated in {elapsed:.1f}s at {args.digits} digits")
+    print(f"generated {moments} moments in {elapsed:.1f}s at {args.digits} digits")
     for name, value in diagonals.items():
         print(f"  {name}: {value.shape}")
     print(f"wrote {data_path.relative_to(REPO_ROOT)} ({data_path.stat().st_size} bytes)")
@@ -171,8 +209,8 @@ def main(argv: list[str] | None = None) -> int:
         sign = np.asarray(
             [
                 (-1.0) ** lag
-                for _h in range(MAXIMUM_HERMITE_ORDER + 1)
-                for lag in range(MAXIMUM_LAGUERRE_ORDER + 1)
+                for _h in range(args.hermite + 1)
+                for lag in range(args.laguerre + 1)
             ]
         )
         convention = sign[:, None] * sign[None, :]
