@@ -163,6 +163,83 @@ def test_velocity_basis_orthonormality_and_validation() -> None:
     assert l0.shape == (1, 2)
 
 
+@pytest.mark.parametrize("nl", [4, 8, 16, 32, 64])
+def test_laguerre_transform_roundtrip_is_exact_at_high_resolution(nl: int) -> None:
+    """The Laguerre pair must invert to machine precision at every resolution.
+
+    This guards a failure that was silent: the earlier construction stored the
+    unweighted ``L_ell(x_j)``, which reaches 1e18 at the outermost Gauss node,
+    and paired it with Golub-Welsch eigenvector weights whose true value
+    ``~exp(-x_j) ~ 1e-54`` sits far below the eigenvector's own accuracy. The
+    round-trip degraded from 1e-12 at ``nl=12`` to 1e-3 at 20 and 1e14 at 32,
+    with no error and no obvious symptom in the physics, so any run at
+    ``Nl >= 20`` was quietly wrong.
+    """
+    from gkx.core.velocity import laguerre_quadrature_count, laguerre_transform
+
+    to_grid, to_spectral, roots = laguerre_transform(nl)
+    nj = laguerre_quadrature_count(nl)
+    assert to_grid.shape == (nl, nj)
+    assert to_spectral.shape == (nj, nl)
+
+    identity_error = np.abs(to_grid @ to_spectral - np.eye(nl)).max()
+    assert identity_error < 1.0e-10, f"nl={nl}: round-trip error {identity_error:.3e}"
+
+    # Bounded entries and conditioning are what make the round trip survivable
+    # in float32 too; the unweighted form failed both by two dozen orders.
+    assert np.abs(to_grid).max() <= 1.0
+    assert np.linalg.cond(to_grid) < 50.0
+
+    to_grid32 = to_grid.astype(np.float32)
+    to_spectral32 = to_spectral.astype(np.float32)
+    error32 = np.abs(to_grid32 @ to_spectral32 - np.eye(nl, dtype=np.float32)).max()
+    assert error32 < 1.0e-5, f"nl={nl}: float32 round-trip error {error32:.3e}"
+
+    # Independent check on the analytic weights: an nj-point Gauss-Laguerre
+    # rule integrates x^k exactly against exp(-x) for k <= 2*nj - 1, and
+    # int_0^inf x^k exp(-x) dx = k!. to_spectral[j, 0] is exp(-x_j/2) * W_j
+    # with W_j = w_j exp(x_j), so w_j = to_spectral[j, 0] * exp(-x_j/2).
+    weights = to_spectral[:, 0] * np.exp(-0.5 * roots)
+    factorial = 1.0
+    for k in range(min(2 * nj, 12)):
+        if k > 0:
+            factorial *= k
+        assert np.isclose(np.sum(weights * roots**k), factorial, rtol=1.0e-10)
+
+
+def test_laguerre_transform_sign_convention_is_unchanged() -> None:
+    """``to_grid[ell, j]`` must stay ``(-1)**ell * exp(-x_j/2) * L_ell(x_j)``.
+
+    The shipped collision tables are keyed to this sign (the
+    ``laguerre_convention`` fields under ``gkx/data``), so a flip here would
+    corrupt them silently rather than fail loudly.
+    """
+    from gkx.core.velocity import laguerre_transform
+
+    nl = 12
+    to_grid, to_spectral, roots = laguerre_transform(nl)
+    reference = np.polynomial.laguerre.lagval(roots, np.eye(nl), tensor=True)
+    expected = ((-1.0) ** np.arange(nl))[:, None] * np.exp(-0.5 * roots) * reference
+    assert np.abs(to_grid - expected).max() < 1.0e-12
+
+    # to_spectral must carry the identical sign, differing from to_grid only
+    # by the per-node weight. That is what makes the projector itself
+    # convention-independent, so downstream tables see no change.
+    weights = to_spectral[:, 0] / to_grid[0, :]
+    assert np.allclose(to_spectral.T, to_grid * weights[None, :], rtol=1.0e-12)
+
+
+def test_laguerre_transform_rejects_a_degraded_pair() -> None:
+    """The round-trip guard must fire rather than return an unusable transform."""
+    from gkx.core import velocity
+
+    to_grid, to_spectral, _ = velocity.laguerre_transform(8)
+    with pytest.raises(ValueError, match="round-trip identity error"):
+        velocity._check_laguerre_transform_conditioning(
+            to_grid, to_spectral * 1.01, to_grid.shape[0]
+        )
+
+
 def test_species_builder_core_contracts() -> None:
     from gkx.operators.linear.params import Species, build_linear_params
 

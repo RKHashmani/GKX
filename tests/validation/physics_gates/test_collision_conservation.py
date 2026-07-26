@@ -298,3 +298,34 @@ def test_finite_larmor_conservation_defect_is_first_order_in_b() -> None:
         for index in range(int(small.sum()) + 1)
     ]
     assert np.all(np.diff(defects) > 0.0)
+
+
+def test_laguerre_transform_is_well_conditioned_at_high_resolution() -> None:
+    """The velocity transform must stay accurate at the resolutions physics needs.
+
+    Storing unweighted Laguerre polynomials makes ``to_grid`` reach 1e14 by
+    nl = 16 and 1e19 by nl = 20, because the largest Gauss node grows like
+    4*nj, and the separately applied exp(-x) weight then has to cancel a
+    growing number of digits. Folding exp(-x/2) into the recurrence bounds the
+    stored values by the Szego bound instead, so the round-trip identity stays
+    near machine precision.
+
+    Published convergence studies ask for up to J = 16 Laguerre moments, and
+    the collisionless zonal-flow residual needs more, so this range has to hold
+    with headroom rather than sit at the edge of a cliff.
+    """
+
+    from gkx.core.velocity import laguerre_transform
+
+    for resolution in (8, 16, 20, 24, 32, 64, 96):
+        to_grid, to_spectral, _ = laguerre_transform(resolution)
+        to_grid = np.asarray(to_grid)
+        identity = np.abs(
+            to_grid @ np.asarray(to_spectral) - np.eye(resolution)
+        ).max()
+        assert identity < 1.0e-8, f"nl={resolution} round-trip {identity:.3e}"
+        # The Szego bound is what keeps the transform conditioned.
+        assert np.abs(to_grid).max() <= 1.0 + 1.0e-9, (
+            f"nl={resolution} stores unweighted polynomials again: "
+            f"max|to_grid| = {np.abs(to_grid).max():.3e}"
+        )
