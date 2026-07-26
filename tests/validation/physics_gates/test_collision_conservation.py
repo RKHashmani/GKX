@@ -329,3 +329,58 @@ def test_laguerre_transform_is_well_conditioned_at_high_resolution() -> None:
             f"nl={resolution} stores unweighted polynomials again: "
             f"max|to_grid| = {np.abs(to_grid).max():.3e}"
         )
+
+
+def test_finite_larmor_tables_ship_multiple_resolutions() -> None:
+    """Each shipped resolution must load, verify, and satisfy the same physics.
+
+    Published convergence studies need well past the eight moments that match
+    the drift-kinetic tables, so more than one resolution has to be available
+    and every one of them has to pass the same structural checks.
+    """
+
+    from gkx.operators.linear.collision_tables import (
+        FINITE_WAVELENGTH_MOMENT_COUNTS,
+        _finite_wavelength_coulomb_bundle,
+        build_finite_wavelength_coulomb_operator,
+        finite_wavelength_coulomb_metadata,
+    )
+
+    assert len(FINITE_WAVELENGTH_MOMENT_COUNTS) >= 2
+
+    for moments in FINITE_WAVELENGTH_MOMENT_COUNTS:
+        metadata = finite_wavelength_coulomb_metadata(moments)
+        hermite = int(metadata["maximum_hermite_order"])
+        laguerre = int(metadata["maximum_laguerre_order"])
+        assert (hermite + 1) * (laguerre + 1) == moments
+
+        arrays, _ = _finite_wavelength_coulomb_bundle(moments)
+        matrix = np.asarray(arrays["test_matrix"][0]) + np.asarray(
+            arrays["field_matrix"][0]
+        )
+        assert matrix.shape == (moments, moments)
+
+        # Same drift-kinetic limit physics at every resolution: the invariants
+        # are conserved and the operator is self-adjoint and dissipative.
+        basis = np.eye(moments)
+        stride = laguerre + 1
+        invariants = (
+            basis[0],
+            basis[stride],
+            basis[1] + basis[2 * stride] / np.sqrt(2.0),
+        )
+        for functional in invariants:
+            assert np.abs(functional @ matrix).max() < conservation_tolerance()
+        assert (
+            np.abs(matrix - matrix.T).max() / np.abs(matrix).max()
+            < conservation_tolerance()
+        )
+        assert float(np.linalg.eigvalsh(0.5 * (matrix + matrix.T)).max()) < 1.0e-9
+
+        operator = build_finite_wavelength_coulomb_operator(
+            jnp.asarray([1.0]), jnp.asarray([1.0]), jnp.asarray([1.0]), moments
+        )
+        assert operator.test_table.shape[-1] == moments
+
+    with pytest.raises(ValueError, match="no shipped finite-wavelength"):
+        _finite_wavelength_coulomb_bundle(12)
