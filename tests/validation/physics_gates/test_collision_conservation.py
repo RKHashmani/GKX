@@ -118,6 +118,52 @@ def test_drift_kinetic_operators_are_dissipative(model: str) -> None:
     assert float(eigenvalues.min()) < -0.1, model
 
 
+@pytest.mark.parametrize("model", ["sugama", "improved_sugama", "coulomb"])
+def test_drift_kinetic_operators_are_self_adjoint(model: str) -> None:
+    """The linearized operator is self-adjoint in the Maxwellian-weighted basis.
+
+    Onsager symmetry is an independent structural check: it constrains the
+    off-diagonal moment couplings, which conservation and dissipativity alone
+    do not. In the orthonormal Hermite-Laguerre basis it makes the drift-kinetic
+    matrix exactly symmetric.
+    """
+
+    matrix = drift_kinetic_matrices()[model]
+    asymmetry = np.abs(matrix - matrix.T).max() / np.abs(matrix).max()
+    assert asymmetry < conservation_tolerance(), f"{model}: {asymmetry:.3e}"
+
+
+def test_finite_larmor_self_adjointness_breaks_at_first_order_in_b() -> None:
+    """Gyroaveraging breaks plain symmetry at first order in b, and no faster.
+
+    At finite perpendicular wavelength the operator is self-adjoint with
+    respect to a gyroaveraging-weighted inner product rather than the plain
+    one, so the stored matrix acquires an antisymmetric part. That part must
+    vanish at b = 0 and grow as B^2, matching the conservation defect.
+    """
+
+    _, metadata = _finite_wavelength_coulomb_bundle()
+    grid = np.asarray(metadata["bessel_argument_grid"], dtype=float)
+
+    zero = finite_wavelength_matrix(0)
+    assert (
+        np.abs(zero - zero.T).max() / np.abs(zero).max() < conservation_tolerance()
+    ), "the drift-kinetic limit must stay self-adjoint"
+
+    small = (grid > 0.0) & (grid <= 0.5)
+    asymmetry = np.array(
+        [
+            np.abs(
+                (matrix := finite_wavelength_matrix(index)) - matrix.T
+            ).max()
+            for index in np.flatnonzero(small)
+        ]
+    )
+    assert np.all(asymmetry > 0.0)
+    exponent = float(np.polyfit(np.log(grid[small]), np.log(asymmetry), 1)[0])
+    assert 1.8 <= exponent <= 2.3, f"asymmetry scales as B^{exponent:.3f}, not B^2"
+
+
 def test_finite_larmor_coulomb_conserves_invariants_at_zero_wavelength() -> None:
     """At b = 0 the gyrocenter and particle moments coincide, so conservation is exact."""
 
