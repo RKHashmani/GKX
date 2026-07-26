@@ -58,6 +58,12 @@ def conservation_tolerance() -> float:
     return 1.0e-12 if jnp.zeros(1).dtype == jnp.float64 else 1.0e-5
 
 
+def coefficient_tolerance() -> float:
+    """Absolute tolerance for comparing against published closed forms."""
+
+    return 1.0e-10 if jnp.zeros(1).dtype == jnp.float64 else 1.0e-5
+
+
 def collisional_invariants() -> dict[str, np.ndarray]:
     """Return the density, parallel-momentum, and energy moment functionals."""
 
@@ -116,6 +122,88 @@ def test_drift_kinetic_operators_are_dissipative(model: str) -> None:
     assert float(eigenvalues.max()) < conservation_tolerance(), model
     # The operator must actually dissipate, not merely fail to grow.
     assert float(eigenvalues.min()) < -0.1, model
+
+
+SQRT_2_OVER_PI = np.sqrt(2.0 / np.pi)
+SQRT_1_OVER_PI = np.sqrt(1.0 / np.pi)
+SQRT_1_OVER_3PI = np.sqrt(1.0 / (3.0 * np.pi))
+
+# Hermite-major index p*(J+1)+j at J = 1.
+MOMENT_INDEX = {(2, 0): 4, (0, 1): 1, (3, 0): 6, (1, 1): 3}
+
+# Frei, Ernst & Ricci (2022), Appendix C, in units of nu_aa. The published
+# lists are upper triangular; the transpose follows from self-adjointness.
+PUBLISHED_COEFFICIENTS = {
+    # Equations (C9a)-(C9f): linearized Coulomb, like species.
+    "coulomb": {
+        ((2, 0), (2, 0)): -(16 / 15) * SQRT_2_OVER_PI,
+        ((2, 0), (0, 1)): -(16 / 15) * SQRT_1_OVER_PI,
+        ((0, 1), (0, 1)): -(8 / 15) * SQRT_2_OVER_PI,
+        ((3, 0), (3, 0)): -(8 / 5) * SQRT_2_OVER_PI,
+        ((3, 0), (1, 1)): -(8 / 5) * SQRT_1_OVER_3PI,
+        ((1, 1), (1, 1)): -(28 / 15) * SQRT_2_OVER_PI,
+    },
+    # Equations (C6a)-(C6f): original Sugama, like species.
+    "sugama": {
+        ((2, 0), (2, 0)): -(64 / 45) * SQRT_2_OVER_PI,
+        ((2, 0), (0, 1)): -(64 / 45) * SQRT_1_OVER_PI,
+        ((0, 1), (0, 1)): -(32 / 45) * SQRT_2_OVER_PI,
+        ((3, 0), (3, 0)): -(361 / 175) * SQRT_2_OVER_PI,
+        ((3, 0), (1, 1)): -(208 / 175) * SQRT_1_OVER_3PI,
+        ((1, 1), (1, 1)): -(1187 / 525) * SQRT_2_OVER_PI,
+    },
+}
+
+
+@pytest.mark.parametrize("model", ["coulomb", "sugama"])
+def test_matrices_match_published_closed_form_coefficients(model: str) -> None:
+    """Assert the shipped tables against the published closed forms.
+
+    This is the strongest available check on the generated coefficients: every
+    retained entry has an exact analytic value in Frei, Ernst & Ricci (2022),
+    Appendix C, so agreement is a statement about the numbers themselves rather
+    than about an internal consistency relation.
+
+    GKX stores the opposite Laguerre sign convention to the paper
+    (``laguerre_convention: gkx_opposite_to_paper``), so a published entry maps
+    onto the stored one through ``(-1)^(j + j')``. That flips exactly the
+    couplings between different Laguerre parities and leaves same-parity
+    entries alone, which is what makes this a convention check as well as a
+    value check.
+    """
+
+    matrix = drift_kinetic_matrices()[model]
+    for (left, right), published in PUBLISHED_COEFFICIENTS[model].items():
+        convention = (-1.0) ** (left[1] + right[1])
+        expected = convention * published
+        for row, column in ((left, right), (right, left)):
+            stored = float(matrix[MOMENT_INDEX[row], MOMENT_INDEX[column]])
+            assert stored == pytest.approx(expected, abs=coefficient_tolerance()), (
+                f"{model} C[{row},{column}]: stored {stored:+.10f}, "
+                f"published {published:+.10f} in the paper convention"
+            )
+
+
+def test_sugama_and_coulomb_share_the_published_temperature_block_ratio() -> None:
+    """The Sugama (2,0)/(0,1) block is exactly 4/3 of the Coulomb block.
+
+    Frei, Ernst & Ricci (2022) note this relation, and it does not extend to
+    the heat-flux block, so it separates the two models structurally rather
+    than by an overall scale.
+    """
+
+    coulomb = drift_kinetic_matrices()["coulomb"]
+    sugama = drift_kinetic_matrices()["sugama"]
+    for pair in (((2, 0), (2, 0)), ((2, 0), (0, 1)), ((0, 1), (0, 1))):
+        row, column = MOMENT_INDEX[pair[0]], MOMENT_INDEX[pair[1]]
+        assert float(sugama[row, column]) == pytest.approx(
+            (4.0 / 3.0) * float(coulomb[row, column]), rel=1.0e-5
+        )
+
+    # The heat-flux block deviates, so the models are not a rescaling.
+    heat = (MOMENT_INDEX[(3, 0)], MOMENT_INDEX[(3, 0)])
+    ratio = float(sugama[heat]) / float(coulomb[heat])
+    assert ratio == pytest.approx(361.0 / 280.0, rel=1.0e-5)
 
 
 @pytest.mark.parametrize("model", ["sugama", "improved_sugama", "coulomb"])
