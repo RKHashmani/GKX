@@ -312,6 +312,45 @@ checksummed float64. The runtime interpolates at :math:`B=\sqrt{2b}` from the
 cached :math:`b`, so one table covers every perpendicular wavenumber, and it
 selects the table matching the run's ``Nl*Nm`` automatically.
 
+Cost and the resolution ceiling
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The finite-Larmor operator interpolates its tables at every grid point, so the
+compiler sees a distinct moment matrix per :math:`(k_y, k_x, z)`. That storage
+grows as :math:`n^2` in the moment count while the state grows as :math:`n`.
+Measured temporary storage in the compiled linear RHS, relative to the built-in
+diagonal operator on a 16x8x32 grid:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 35 35
+
+   * - moments
+     - diagonal operator
+     - finite-Larmor Coulomb
+   * - 8 ``(4, 2)``
+     - 1.8 MB
+     - 10.6 MB (5.9x)
+   * - 18 ``(6, 3)``
+     - 3.9 MB
+     - 47.3 MB (12.1x)
+
+This is comfortable at the resolutions GKX ships, and it is the mechanism that
+bounds the reachable resolution. Extrapolating the per-point matrices to a
+32x64x32 grid gives 0.07 GB at 8 moments, 0.34 GB at 18, but **17 GB at**
+``(16, 8)`` and 275 GB at ``(32, 16)`` -- so the published convergence
+resolutions are not reachable in this form on a 16 GB card.
+
+A rank-:math:`R` separable factorization in the Bessel argument is the obvious
+candidate, and the tables do support it: the :math:`B` dependence is smooth, and
+:math:`R=10` reconstructs both shipped resolutions to about :math:`10^{-6}`.
+A direct micro-benchmark of the naive form was not an unambiguous win, however
+-- it traded roughly four times the arithmetic for the lower memory traffic, and
+the compiler already fuses part of the interpolation -- so this is recorded as a
+measured constraint rather than an implemented optimization.
+``tests/validation/physics_gates/test_collision_operator_cost.py`` bounds the
+current cost so a structural regression is caught.
+
 Published convergence studies ask for considerably more than eight moments --
 (16,8) for linear Cyclone-base-case ITG and (32,16) for the converged case -- so
 resolution should be scanned rather than assumed. Generate further resolutions
