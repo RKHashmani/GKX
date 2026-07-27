@@ -244,6 +244,7 @@ def run(
     hermite: int | None = None,
     frames_only: bool = False,
     snapshots: Path | None = None,
+    spinup_steps: int = 0,
 ) -> int:
     cfg, _ = load_runtime_from_toml(config)
     geometry = build_runtime_geometry(cfg)
@@ -280,6 +281,23 @@ def run(
         .set(jnp.asarray(spectral_seed, dtype=complex_dtype))
     )
 
+    if spinup_steps > 0:
+        # Advance through the linear growth phase without recording. A movie
+        # that spends its length on exponential growth is showing an
+        # instability, not turbulence; the interesting state is the saturated
+        # one, and reaching it costs the same either way. Recording only after
+        # spin-up spends the frames where the physics is.
+        print(
+            f"spin-up: {spinup_steps} steps to t = {spinup_steps * step:.1f}",
+            flush=True,
+        )
+        result = integrate_nonlinear_cached(
+            state, cache, params, step, spinup_steps, method="rk4"
+        )
+        state = result[0] if isinstance(result, tuple) else result
+        peak = float(np.abs(potential_real_space(state, cache, params, cfg)).max())
+        print(f"spin-up done, max|phi| = {peak:.4e}", flush=True)
+
     if snapshots is not None:
         # Compute-only pass. Rendering is matplotlib on the CPU and takes far
         # longer than the physics, so holding a GPU allocation through it wastes
@@ -301,7 +319,7 @@ def run(
         np.savez_compressed(
             snapshots,
             phi=np.stack(frames_out),
-            times=np.arange(1, frames + 1) * steps_per_frame * step,
+            times=(spinup_steps + np.arange(1, frames + 1) * steps_per_frame) * step,
             label=config.stem.replace("_", " "),
             q=float(getattr(geometry, "q", 1.4) or 1.4),
             epsilon=float(getattr(geometry, "epsilon", 0.18) or 0.18),
@@ -453,6 +471,12 @@ def main() -> int:
     parser.add_argument("--laguerre", type=int, default=None)
     parser.add_argument("--hermite", type=int, default=None)
     parser.add_argument(
+        "--spinup-steps",
+        type=int,
+        default=0,
+        help="integrate this many steps before recording, to reach saturation",
+    )
+    parser.add_argument(
         "--snapshots",
         type=Path,
         default=None,
@@ -497,6 +521,7 @@ def main() -> int:
         hermite=args.hermite,
         frames_only=args.frames_only,
         snapshots=args.snapshots,
+        spinup_steps=args.spinup_steps,
     )
 
 
