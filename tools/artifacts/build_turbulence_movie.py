@@ -1,0 +1,380 @@
+"""Render a 3D turbulence movie of the electrostatic potential on a flux tube.
+
+Runs GKX's nonlinear solver in chunks, capturing ``phi`` after each chunk, and
+draws each frame twice: as the perpendicular cut a gyrokineticist reads, and as
+the field-aligned tube in real space that shows why the cut looks the way it
+does. The turbulence is elongated along ``B``, and a flux-tube movie that only
+ever shows the perpendicular plane hides exactly that.
+
+The tube is drawn by mapping the field-aligned coordinate ``z`` onto the actual
+field line: for an axisymmetric equilibrium that is a helix on a torus of
+aspect ratio ``R0/a``; for a stellarator the same construction is used with the
+device's field periods, so the twist shown is the geometry's own.
+
+Chunked integration is deliberate: the cache and parameters are fixed, so JAX
+compiles the chunk once and replays it, which is far cheaper than one long scan
+with a snapshot callback inside it.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import subprocess
+import sys
+
+import jax.numpy as jnp
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+
+from gkx.artifacts.figure_style import figure_style, save_figure  # noqa: E402
+from gkx.solvers.nonlinear.state_integration import (  # noqa: E402
+    integrate_nonlinear_cached,
+)
+from gkx.terms.fields import solve_fields  # noqa: E402
+from gkx.workflows.runtime.startup import (  # noqa: E402
+    build_runtime_geometry,
+    build_runtime_linear_params,
+)
+from gkx.workflows.runtime.toml import load_runtime_from_toml  # noqa: E402
+
+
+def _species_arrays(cfg) -> dict[str, jnp.ndarray]:
+    """Per-species arrays ``solve_fields`` needs, in config order."""
+
+    species = list(cfg.species)
+    pull = lambda name, default: jnp.asarray(  # noqa: E731
+        [float(getattr(s, name, default)) for s in species]
+    )
+    charge = pull("charge", 1.0)
+    density = pull("density", 1.0)
+    temp = pull("temperature", 1.0)
+    mass = pull("mass", 1.0)
+    return {
+        "charge": charge,
+        "density": density,
+        "temp": temp,
+        "mass": mass,
+        "tz": temp / charge,
+        "vth": jnp.sqrt(2.0 * temp / mass),
+    }
+
+
+def potential_real_space(state, cache, params, cfg) -> np.ndarray:
+    """Return ``phi(x, y, z)`` in real space from the spectral state."""
+
+    fields = solve_fields(
+        state,
+        cache,
+        params,
+        fapar=jnp.asarray(0.0),
+        w_bpar=jnp.asarray(0.0),
+        **_species_arrays(cfg),
+    )
+    phi = np.asarray(fields.phi)  # (ky, kx, z)
+
+    # Match the transform the nonlinear bracket itself uses
+    # (operators/nonlinear/brackets.py): ky is the compressed real-FFT axis and
+    # only its first nyc entries are physical, while kx is a full complex axis.
+    # Treating both as full axes instead -- the obvious guess -- silently mixes
+    # the redundant negative-ky half back in and leaves a "real-space" field
+    # with a few percent imaginary part.
+    ny_full, nkx = phi.shape[0], phi.shape[1]
+    nyc = ny_full // 2 + 1
+    scale = float(ny_full * nkx)
+    real = np.fft.irfft2(phi[:nyc], s=(nkx, ny_full), axes=(-2, -3)) * scale
+    return np.transpose(real, (1, 0, 2))  # (y, x, z) -> (x, y, z)
+
+
+def _field_line_tube(geometry, cfg, samples: int, *, turns: float = 1.5):
+    """Cartesian centre line of the flux tube plus an orthonormal local frame.
+
+    The field line advances ``q`` times faster in toroidal than in poloidal
+    angle, and a stellarator's field-period count sets how far it wanders per
+    poloidal transit -- so the twist drawn here is the equilibrium's own rather
+    than decoration.
+    """
+
+    q = float(getattr(geometry, "q", 1.4) or 1.4)
+    epsilon = float(getattr(geometry, "epsilon", 0.18) or 0.18)
+    major = float(getattr(geometry, "R0", 3.0) or 3.0)
+    minor = epsilon * major
+    nfp = max(int(getattr(geometry, "nfp", 1) or 1), 1)
+
+    theta = np.linspace(-turns * np.pi, turns * np.pi, samples)
+    zeta = q * theta / nfp
+
+    radius = major + minor * np.cos(theta)
+    centre = np.stack(
+        [radius * np.cos(zeta), radius * np.sin(zeta), minor * np.sin(theta)], axis=-1
+    )
+
+    tangent = np.gradient(centre, axis=0)
+    tangent /= np.linalg.norm(tangent, axis=-1, keepdims=True) + 1e-30
+    outward = np.stack(
+        [np.cos(zeta) * np.cos(theta), np.sin(zeta) * np.cos(theta), np.sin(theta)],
+        axis=-1,
+    )
+    outward -= tangent * np.sum(outward * tangent, axis=-1, keepdims=True)
+    outward /= np.linalg.norm(outward, axis=-1, keepdims=True) + 1e-30
+    binormal = np.cross(tangent, outward)
+    return centre, outward, binormal, minor, major
+
+
+def _torus_wireframe(major: float, minor: float, n_major: int = 60, n_minor: int = 18):
+    """A faint torus for spatial context behind the tube."""
+
+    u = np.linspace(0.0, 2.0 * np.pi, n_major)
+    v = np.linspace(0.0, 2.0 * np.pi, n_minor)
+    uu, vv = np.meshgrid(u, v, indexing="ij")
+    r = major + minor * np.cos(vv)
+    return r * np.cos(uu), r * np.sin(uu), minor * np.sin(vv)
+
+
+def render_frame(
+    phi: np.ndarray,
+    geometry,
+    cfg,
+    *,
+    output: Path,
+    time: float,
+    scale: float,
+    label: str,
+) -> None:
+    """Draw one frame: perpendicular cut plus the field-aligned tube."""
+
+    nx, ny, nz = phi.shape
+    midplane = phi[:, :, nz // 2]
+
+    with figure_style():
+        fig = plt.figure(figsize=(11.6, 5.0))
+        grid = fig.add_gridspec(1, 2, width_ratios=(1.0, 1.25), wspace=0.18)
+
+        # ---- perpendicular cut -------------------------------------------
+        ax = fig.add_subplot(grid[0, 0])
+        mesh = ax.imshow(
+            midplane.T,
+            origin="lower",
+            cmap="RdBu_r",
+            vmin=-scale,
+            vmax=scale,
+            aspect="auto",
+            interpolation="bilinear",
+        )
+        ax.set_xlabel(r"$x/\rho_i$")
+        ax.set_ylabel(r"$y/\rho_i$")
+        ax.set_title("Perpendicular cut at the outboard midplane")
+        ax.grid(False)
+        bar = fig.colorbar(mesh, ax=ax, fraction=0.046, pad=0.03)
+        bar.set_label(r"$e\phi/T_i$")
+
+        # ---- field-aligned tube -------------------------------------------
+        ax3d = fig.add_subplot(grid[0, 1], projection="3d")
+
+        # Resample along z so the tube is smooth even when the parallel grid is
+        # coarse; nz is a physics resolution, not a rendering one.
+        samples = max(4 * nz, 160)
+        centre, outward, binormal, minor, major = _field_line_tube(
+            geometry, cfg, samples
+        )
+
+        source_z = np.linspace(0.0, 1.0, nz)
+        target_z = np.linspace(0.0, 1.0, samples)
+        slab = phi[nx // 2]  # (y, z)
+        resampled = np.stack(
+            [np.interp(target_z, source_z, slab[row]) for row in range(ny)], axis=0
+        )
+
+        angle = np.linspace(0.0, 2.0 * np.pi, ny, endpoint=False)
+        radius = 0.85 * minor
+        surface = (
+            centre[None, :, :]
+            + radius * np.cos(angle)[:, None, None] * outward[None, :, :]
+            + radius * np.sin(angle)[:, None, None] * binormal[None, :, :]
+        )
+        normed = 0.5 + 0.5 * np.clip(resampled / (scale + 1e-30), -1.0, 1.0)
+
+        wire_x, wire_y, wire_z = _torus_wireframe(major, minor)
+        ax3d.plot_wireframe(
+            wire_x,
+            wire_y,
+            wire_z,
+            rstride=6,
+            cstride=3,
+            color="#B8B8B8",
+            linewidth=0.35,
+            alpha=0.5,
+        )
+        ax3d.plot_surface(
+            surface[..., 0],
+            surface[..., 1],
+            surface[..., 2],
+            facecolors=plt.cm.RdBu_r(normed),
+            rstride=1,
+            cstride=1,
+            linewidth=0.0,
+            antialiased=False,
+            shade=False,
+        )
+        span = (major + minor) * 1.02
+        ax3d.set_xlim(-span, span)
+        ax3d.set_ylim(-span, span)
+        ax3d.set_zlim(-span, span)
+        ax3d.set_box_aspect((1, 1, 1))
+        ax3d.set_axis_off()
+        ax3d.view_init(elev=32, azim=(-60.0 + time * 2.0) % 360.0)
+        ax3d.set_title(r"Flux tube along $\mathbf{B}$", y=0.94)
+
+        fig.suptitle(f"{label}    $t\\,c_s/a = {time:.1f}$", fontsize=13)
+        save_figure(fig, output)
+
+
+def run(
+    config: Path,
+    output: Path,
+    *,
+    frames: int,
+    steps_per_frame: int,
+    dt: float | None,
+    fps: int,
+    keep_frames: bool,
+    seed: int = 0,
+    amplitude: float = 1.0e-3,
+    laguerre: int | None = None,
+    hermite: int | None = None,
+) -> int:
+    cfg, _ = load_runtime_from_toml(config)
+    geometry = build_runtime_geometry(cfg)
+    params = build_runtime_linear_params(cfg, geom=geometry)
+
+    from gkx.core.grid import build_spectral_grid
+    from gkx.operators.linear.cache_builder import build_linear_cache
+    from gkx.workflows.runtime.startup import _resolve_runtime_hl_dims
+
+    grid = build_spectral_grid(cfg.grid)
+    nl, nm = _resolve_runtime_hl_dims(cfg, Nl=laguerre, Nm=hermite)
+    cache = build_linear_cache(grid, geometry, params, nl, nm)
+    step = float(dt if dt is not None else cfg.time.dt)
+
+    # A small broadband seed in the density moment. Generated in REAL space and
+    # transformed forward, so the spectrum is Hermitian by construction: the
+    # solver's projector only enforces ky <-> -ky, and a spectrum-side random
+    # seed leaves the ky = 0 row not self-conjugate in kx, which shows up later
+    # as a complex "real-space" potential. The movie is about the saturated
+    # state, which forgets the seed; the fixed generator only keeps successive
+    # renders of the same case comparable.
+    generator = np.random.default_rng(seed)
+    perp = (grid.ky.size, grid.kx.size, grid.z.size)
+    spectral_seed = np.fft.fft2(generator.normal(size=perp), axes=(0, 1))
+    spectral_seed *= amplitude / (np.abs(spectral_seed).max() + 1e-30)
+
+    complex_dtype = (
+        jnp.complex64 if jnp.zeros(1).dtype == jnp.float32 else jnp.complex128
+    )
+    shape = (len(cfg.species), nl, nm, *perp)
+    state = (
+        jnp.zeros(shape, dtype=complex_dtype)
+        .at[:, 0, 0]
+        .set(jnp.asarray(spectral_seed, dtype=complex_dtype))
+    )
+
+    frame_dir = output.parent / f"{output.stem}_frames"
+    frame_dir.mkdir(parents=True, exist_ok=True)
+
+    label = config.stem.replace("_", " ")
+    scale = None
+    written: list[Path] = []
+    for index in range(frames):
+        result = integrate_nonlinear_cached(
+            state, cache, params, step, steps_per_frame, method="rk4"
+        )
+        state = result[0] if isinstance(result, tuple) else result
+        phi = potential_real_space(state, cache, params, cfg)
+
+        # Lock the colour scale on the first saturated frame so the movie does
+        # not silently renormalize while the amplitude grows.
+        magnitude = float(np.abs(phi).max())
+        if scale is None or index < frames // 4:
+            scale = max(magnitude, 1e-12)
+
+        frame_path = frame_dir / f"frame_{index:04d}.png"
+        render_frame(
+            phi,
+            geometry,
+            cfg,
+            output=frame_path,
+            time=(index + 1) * steps_per_frame * step,
+            scale=scale,
+            label=label,
+        )
+        written.append(frame_path)
+        print(f"frame {index + 1}/{frames}  max|phi| = {magnitude:.4e}", flush=True)
+
+    encode = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-framerate",
+            str(fps),
+            "-i",
+            str(frame_dir / "frame_%04d.png"),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "23",
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if encode.returncode != 0:
+        print(encode.stderr[-2000:], file=sys.stderr)
+        return 1
+    print(f"wrote {output}")
+
+    if not keep_frames:
+        for path in written:
+            path.unlink()
+        frame_dir.rmdir()
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("config", type=Path)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--frames", type=int, default=120)
+    parser.add_argument("--steps-per-frame", type=int, default=40)
+    parser.add_argument("--dt", type=float, default=None)
+    parser.add_argument("--fps", type=int, default=20)
+    parser.add_argument("--keep-frames", action="store_true")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--amplitude", type=float, default=1.0e-3)
+    parser.add_argument("--laguerre", type=int, default=None)
+    parser.add_argument("--hermite", type=int, default=None)
+    args = parser.parse_args()
+
+    return run(
+        args.config,
+        args.output,
+        frames=args.frames,
+        steps_per_frame=args.steps_per_frame,
+        dt=args.dt,
+        fps=args.fps,
+        keep_frames=args.keep_frames,
+        seed=args.seed,
+        amplitude=args.amplitude,
+        laguerre=args.laguerre,
+        hermite=args.hermite,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
