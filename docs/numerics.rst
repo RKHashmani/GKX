@@ -1320,6 +1320,93 @@ so that the current streaming term uses :math:`\partial_z \tilde{G}` instead of
 the full :math:`H_{\ell m}` derivative. This matches the ordering and ghost
 exchange used by GX’s ``grad_parallel_linked`` operator.
 
+Landau damping against the exact kinetic roots
+----------------------------------------------
+
+The sharpest available check on the Hermite representation is the slab
+gyrokinetic ion-acoustic dispersion relation with adiabatic electrons at
+:math:`k_\perp \to 0`,
+
+.. math::
+
+   1 + \frac{T_i}{T_e} + \zeta Z(\zeta) = 0,
+   \qquad
+   \zeta = \frac{\omega}{k_\parallel \sqrt{2T_i/m_i}},
+
+with :math:`Z` the Fried-Conte plasma dispersion function. It has no free
+parameters, so GKX either reproduces its roots or it does not.
+
+.. list-table:: GKX's linear operator vs the exact roots
+   :header-rows: 1
+
+   * - case
+     - exact
+     - GKX
+     - error
+   * - :math:`T_e/T_i=1`, :math:`\omega`
+     - 2.045904866
+     - 2.047220793
+     - 0.064%
+   * - :math:`T_e/T_i=1`, :math:`\gamma`
+     - -0.851330459
+     - -0.849234188
+     - 0.246%
+   * - :math:`T_e/T_i=10`, :math:`\omega`
+     - 3.728834801
+     - 3.728993838
+     - 0.004%
+   * - :math:`T_e/T_i=10`, :math:`\gamma`
+     - -0.058337421
+     - -0.058339802
+     - 0.004%
+
+.. figure:: _static/landau_damping_validation.png
+   :width: 100%
+
+   Everything shown is produced by ``linear_rhs_cached``, GKX's production
+   linear operator; panel (b) eigen-decomposes that same operator by applying it
+   to Hermite basis vectors.
+
+Why this measurement is harder than it looks
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Four separate traps produce plausible but wrong numbers here. Each is gated in
+``tests/validation/physics_gates/test_landau_damping.py``.
+
+**1. A collisionless truncated Hermite system cannot Landau damp at all.**
+Free streaming is anti-Hermitian, so the truncated matrix has a purely real
+spectrum -- measured :math:`2.8\times10^{-14}`. Whatever a fit returns from a
+collisionless run is a transient that ends at recurrence, not an asymptotic
+rate. The gate asserts both that the spectrum is real *and* that collisions make
+it genuinely damped, so it cannot be satisfied by an operator that does nothing.
+
+**2. The Landau root is not an eigenvalue.** It is a pole of the analytically
+continued response function. Taking the least-damped eigenvalue of the
+collisional operator and extrapolating gives **76% error** at
+:math:`T_e/T_i = 1`, because at strong damping the discrete modes are ballistic
+rather than collective. Landau damping is an initial-value phenomenon and must
+be measured as one: add Lenard-Bernstein collisions, measure the decay at
+several small :math:`\nu`, and extrapolate :math:`\nu \to 0`.
+
+**3. A density perturbation with no initial flow is a standing wave.** It splits
+into left- and right-going sound waves, so the signal stays real and beats
+through zeros. Unwrapping its phase returns :math:`\omega \approx 0.13` instead
+of :math:`2.05`. Fitting :math:`A e^{\gamma t}\cos(\omega t + \phi)` returns the
+root.
+
+**4. Temperature-ratio conventions.** GKX's ``tau_e`` is :math:`T_i/T_e`. Passing
+the reciprocal is invisible at :math:`T_e = T_i` and gives a **2620% error** at
+:math:`T_e/T_i = 10`. The thermal speed carries a second convention: :math:`Z`
+takes :math:`\zeta = \omega/(k\sqrt{2T/m})` while GKX normalizes to
+:math:`v_{ti} = \sqrt{T/m}`, a factor :math:`\sqrt2` that still looks physical.
+
+Panel (a) also shows the crossover that follows from trap 1: the Landau pole
+dominates for roughly two decades, after which the ballistic part of the initial
+condition leaves a plateau, and the revival at
+:math:`t_{\mathrm{rec}} = 2\sqrt{N_m}` ends the useful window entirely.
+
+Regenerate with ``tools/artifacts/build_landau_damping_figure.py``.
+
 Hermite closure and recurrence
 ------------------------------
 
