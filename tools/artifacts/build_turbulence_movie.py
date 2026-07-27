@@ -89,7 +89,7 @@ def potential_real_space(state, cache, params, cfg) -> np.ndarray:
     return np.transpose(real, (1, 0, 2))  # (y, x, z) -> (x, y, z)
 
 
-def _field_line_tube(geometry, cfg, samples: int, *, turns: float = 1.5):
+def _field_line_tube(geometry, samples: int, *, turns: float = 1.5):
     """Cartesian centre line of the flux tube plus an orthonormal local frame.
 
     The field line advances ``q`` times faster in toroidal than in poloidal
@@ -137,7 +137,6 @@ def _torus_wireframe(major: float, minor: float, n_major: int = 60, n_minor: int
 def render_frame(
     phi: np.ndarray,
     geometry,
-    cfg,
     *,
     output: Path,
     time: float,
@@ -177,9 +176,7 @@ def render_frame(
         # Resample along z so the tube is smooth even when the parallel grid is
         # coarse; nz is a physics resolution, not a rendering one.
         samples = max(4 * nz, 160)
-        centre, outward, binormal, minor, major = _field_line_tube(
-            geometry, cfg, samples
-        )
+        centre, outward, binormal, minor, major = _field_line_tube(geometry, samples)
 
         source_z = np.linspace(0.0, 1.0, nz)
         target_z = np.linspace(0.0, 1.0, samples)
@@ -246,6 +243,7 @@ def run(
     laguerre: int | None = None,
     hermite: int | None = None,
     frames_only: bool = False,
+    snapshots: Path | None = None,
 ) -> int:
     cfg, _ = load_runtime_from_toml(config)
     geometry = build_runtime_geometry(cfg)
@@ -282,6 +280,37 @@ def run(
         .set(jnp.asarray(spectral_seed, dtype=complex_dtype))
     )
 
+    if snapshots is not None:
+        # Compute-only pass. Rendering is matplotlib on the CPU and takes far
+        # longer than the physics, so holding a GPU allocation through it wastes
+        # a shared device -- measured 0% utilization against 12.9 GB reserved.
+        # Dump the potential and exit; render anywhere afterwards.
+        frames_out = []
+        for index in range(frames):
+            result = integrate_nonlinear_cached(
+                state, cache, params, step, steps_per_frame, method="rk4"
+            )
+            state = result[0] if isinstance(result, tuple) else result
+            phi = potential_real_space(state, cache, params, cfg)
+            frames_out.append(phi.astype(np.float32))
+            print(
+                f"frame {index + 1}/{frames}  max|phi| = {np.abs(phi).max():.4e}",
+                flush=True,
+            )
+        snapshots.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            snapshots,
+            phi=np.stack(frames_out),
+            times=np.arange(1, frames + 1) * steps_per_frame * step,
+            label=config.stem.replace("_", " "),
+            q=float(getattr(geometry, "q", 1.4) or 1.4),
+            epsilon=float(getattr(geometry, "epsilon", 0.18) or 0.18),
+            major_radius=float(getattr(geometry, "R0", 3.0) or 3.0),
+            nfp=int(getattr(geometry, "nfp", 1) or 1),
+        )
+        print(f"wrote {snapshots}")
+        return 0
+
     frame_dir = output.parent / f"{output.stem}_frames"
     frame_dir.mkdir(parents=True, exist_ok=True)
 
@@ -295,8 +324,6 @@ def run(
         state = result[0] if isinstance(result, tuple) else result
         phi = potential_real_space(state, cache, params, cfg)
 
-        # Lock the colour scale on the first saturated frame so the movie does
-        # not silently renormalize while the amplitude grows.
         magnitude = float(np.abs(phi).max())
         if scale is None or index < frames // 4:
             scale = max(magnitude, 1e-12)
@@ -305,7 +332,6 @@ def run(
         render_frame(
             phi,
             geometry,
-            cfg,
             output=frame_path,
             time=(index + 1) * steps_per_frame * step,
             scale=scale,
@@ -314,9 +340,69 @@ def run(
         written.append(frame_path)
         print(f"frame {index + 1}/{frames}  max|phi| = {magnitude:.4e}", flush=True)
 
+    return _encode(frame_dir, written, output, fps, frames_only, keep_frames)
+
+
+class _SnapshotGeometry:
+    """Minimal geometry stand-in reconstructed from a snapshot file."""
+
+    def __init__(self, q: float, epsilon: float, major_radius: float, nfp: int) -> None:
+        self.q = q
+        self.epsilon = epsilon
+        self.R0 = major_radius
+        self.nfp = nfp
+
+
+def render_snapshots(
+    snapshots: Path, output: Path, *, fps: int, frames_only: bool, keep_frames: bool
+) -> int:
+    """Render frames from a snapshot file written by the compute-only pass."""
+
+    data = np.load(snapshots, allow_pickle=False)
+    phi_series = data["phi"]
+    times = data["times"]
+    label = str(data["label"])
+    geometry = _SnapshotGeometry(
+        float(data["q"]),
+        float(data["epsilon"]),
+        float(data["major_radius"]),
+        int(data["nfp"]),
+    )
+
+    frame_dir = output.parent / f"{output.stem}_frames"
+    frame_dir.mkdir(parents=True, exist_ok=True)
+
+    # Lock the colour scale on the first quarter, once, so the movie does not
+    # silently renormalize while the amplitude is still growing.
+    quarter = max(len(phi_series) // 4, 1)
+    scale = max(float(np.abs(phi_series[:quarter]).max()), 1e-12)
+
+    written: list[Path] = []
+    for index, (phi, time) in enumerate(zip(phi_series, times)):
+        frame_path = frame_dir / f"frame_{index:04d}.png"
+        render_frame(
+            np.asarray(phi, dtype=float),
+            geometry,
+            output=frame_path,
+            time=float(time),
+            scale=scale,
+            label=label,
+        )
+        written.append(frame_path)
+        print(f"rendered {index + 1}/{len(phi_series)}", flush=True)
+
+    return _encode(frame_dir, written, output, fps, frames_only, keep_frames)
+
+
+def _encode(
+    frame_dir: Path,
+    written: list[Path],
+    output: Path,
+    fps: int,
+    frames_only: bool,
+    keep_frames: bool,
+) -> int:
     if frames_only:
-        # Rendering hosts do not always have ffmpeg; frames rsync fine and
-        # encode anywhere.
         print(f"wrote {len(written)} frames to {frame_dir}")
         return 0
 
@@ -355,8 +441,8 @@ def run(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("config", type=Path)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("config", type=Path, nargs="?")
+    parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--frames", type=int, default=120)
     parser.add_argument("--steps-per-frame", type=int, default=40)
     parser.add_argument("--dt", type=float, default=None)
@@ -367,11 +453,35 @@ def main() -> int:
     parser.add_argument("--laguerre", type=int, default=None)
     parser.add_argument("--hermite", type=int, default=None)
     parser.add_argument(
+        "--snapshots",
+        type=Path,
+        default=None,
+        help="compute only: write phi snapshots to this .npz and exit (frees the GPU)",
+    )
+    parser.add_argument(
+        "--render-from",
+        type=Path,
+        default=None,
+        help="render a movie from a snapshot .npz; needs no GPU and no config",
+    )
+    parser.add_argument(
         "--frames-only",
         action="store_true",
         help="render PNG frames and skip ffmpeg encoding",
     )
     args = parser.parse_args()
+
+    if args.snapshots is None and args.output is None:
+        parser.error("--output is required unless --snapshots is given")
+
+    if args.render_from is not None:
+        return render_snapshots(
+            args.render_from,
+            args.output,
+            fps=args.fps,
+            frames_only=args.frames_only,
+            keep_frames=args.keep_frames,
+        )
 
     return run(
         args.config,
@@ -386,6 +496,7 @@ def main() -> int:
         laguerre=args.laguerre,
         hermite=args.hermite,
         frames_only=args.frames_only,
+        snapshots=args.snapshots,
     )
 
 
