@@ -145,3 +145,64 @@ def test_geometry_params_helper_carries_the_parallel_scale() -> None:
         GeometryConfig(q=1.4, s_hat=0.8, epsilon=0.18, R0=2.78)
     )
     assert linear_params_for_geometry(geometry, kpar_scale=1.0).kpar_scale == 1.0
+
+
+def test_electromagnetic_zonal_solve_is_continuous_in_beta() -> None:
+    """The field solve must not jump when beta becomes infinitesimally finite.
+
+    The adiabatic species responds to ``phi - <phi>``, so quasineutrality
+    carries a ``tau_e<phi>`` source at ``ky = 0``. The electrostatic branch
+    solves for it exactly; the electromagnetic branch used to rebuild ``phi``
+    from ``nbar`` alone and drop it, which over-screened the zonal potential by
+    a factor of 7.3 and made the solve discontinuous as ``beta -> 0``.
+
+    Continuity in ``beta`` is the sharp statement: no physical quantity may
+    jump between ``beta = 0`` and ``beta = 1e-12``.
+    """
+
+    from gkx.terms.fields import solve_fields
+
+    grid = build_spectral_grid(GridConfig(Nx=5, Ny=2, Nz=16, Lx=40.0, Ly=40.0))
+    geometry = SAlphaGeometry.from_config(
+        GeometryConfig(q=1.4, s_hat=0.8, epsilon=0.18, R0=2.78)
+    )
+    generator = np.random.default_rng(0)
+    shape = (1, 4, 4, grid.ky.size, grid.kx.size, grid.z.size)
+    state = jnp.asarray(
+        generator.normal(size=shape) * 1.0e-3
+        + 1j * generator.normal(size=shape) * 1.0e-3
+    )
+    unit = jnp.asarray([1.0])
+
+    def zonal_potential(beta: float) -> np.ndarray:
+        params = linear_params_for_geometry(geometry, beta=beta, tau_e=1.0)
+        cache = build_linear_cache(grid, geometry, params, 4, 4)
+        fields = solve_fields(
+            state,
+            cache,
+            params,
+            charge=unit,
+            density=unit,
+            temp=unit,
+            mass=unit,
+            tz=unit,
+            vth=unit,
+            fapar=jnp.asarray(0.0),
+            w_bpar=jnp.asarray(1.0),
+        )
+        return np.asarray(fields.phi)
+
+    electrostatic = zonal_potential(0.0)
+    infinitesimal = zonal_potential(1.0e-12)
+
+    zonal_es = np.abs(electrostatic[..., 0, 1, :]).max()
+    zonal_em = np.abs(infinitesimal[..., 0, 1, :]).max()
+    assert zonal_es > 0.0
+    assert abs(zonal_em / zonal_es - 1.0) < 1.0e-9, (
+        f"zonal potential jumps by {zonal_em / zonal_es:.4f} between beta=0 and "
+        "beta=1e-12; the ky=0 adiabatic correction is missing from the "
+        "electromagnetic branch"
+    )
+
+    # Finite beta must still do something physical rather than nothing.
+    assert np.abs(zonal_potential(1.0e-2)[..., 0, 1, :]).max() / zonal_es < 0.99
