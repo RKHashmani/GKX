@@ -45,9 +45,10 @@ def test_closure_coefficient_matches_the_analytic_form() -> None:
 
     # The M = 2 member is exactly the Hammett-Perkins three-pole coefficient,
     # which is an independent check on the whole family.
-    assert abs(
-        hermite_closure_coefficient(3) - float(np.sqrt(8.0 / np.pi) / np.sqrt(3.0))
-    ) < 1.0e-14
+    assert (
+        abs(hermite_closure_coefficient(3) - float(np.sqrt(8.0 / np.pi) / np.sqrt(3.0)))
+        < 1.0e-14
+    )
 
 
 def _streaming(state, hermite_count, wavenumbers, closure):
@@ -101,8 +102,10 @@ def test_closure_acts_only_on_the_last_moment_and_dissipates() -> None:
 
     # The added term is exactly -R sqrt(M+1) v_th |k_par| G_M.
     coefficient = hermite_closure_coefficient(hermite_count)
-    expected = -coefficient * math.sqrt(hermite_count) * np.asarray(
-        abs_z_periodic(state[:, :, hermite_count - 1], kz=wavenumbers)
+    expected = (
+        -coefficient
+        * math.sqrt(hermite_count)
+        * np.asarray(abs_z_periodic(state[:, :, hermite_count - 1], kz=wavenumbers))
     )
     # The matrices are assembled in the ambient precision, so the agreement
     # floor follows it: ~1e-13 under x64, ~1e-4 under the float32 policy.
@@ -111,9 +114,7 @@ def test_closure_acts_only_on_the_last_moment_and_dissipates() -> None:
     assert np.abs(difference[0, 0, -1] - expected[0, 0]).max() < tolerance * scale
 
     # Strictly dissipative: it can only remove free energy from the last moment.
-    production = float(
-        np.real(np.sum(np.conj(state[0, 0, -1]) * difference[0, 0, -1]))
-    )
+    production = float(np.real(np.sum(np.conj(state[0, 0, -1]) * difference[0, 0, -1])))
     assert production < 0.0
 
 
@@ -149,3 +150,62 @@ def test_truncation_remains_the_default() -> None:
     assert np.array_equal(
         default, _streaming(state, hermite_count, wavenumbers, "truncation")
     )
+
+
+def test_free_streaming_conserves_norm_so_g0_cannot_exceed_one() -> None:
+    """``|g_0|`` can never exceed its initial value under free streaming.
+
+    The streaming operator is anti-Hermitian, so ``||g||`` is conserved and
+    ``|g_0| <= ||g||``. This gate exists because an earlier analysis of this
+    very hierarchy reported truncation "reviving" ``|g_0|`` to 8-16x the initial
+    amplitude, which this bound makes impossible. Any future measurement that
+    reports amplification is measuring something else -- a ratio to a
+    quiescent floor, or a different normalization -- and must say so.
+    """
+
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from tools.artifacts.build_recurrence_closure_figure import free_streaming_revival
+
+    for hermite in (16, 64):
+        _, amplitude = free_streaming_revival(hermite, "truncation")
+        assert amplitude.max() <= 1.0 + 1.0e-9, (
+            f"N_m={hermite}: |g_0| reached {amplitude.max():.4f} > 1, which "
+            "violates norm conservation for an anti-Hermitian operator"
+        )
+        # And the reflection must be essentially complete, which is the actual
+        # indictment of a hard truncation: it dissipates nothing.
+        assert amplitude.max() > 0.99, (
+            f"N_m={hermite}: truncation revival {amplitude.max():.4f} is lower "
+            "than expected for a perfectly reflecting wall"
+        )
+
+
+def test_absorbing_closures_beat_truncation_on_both_metrics() -> None:
+    """Both absorbing treatments must suppress revival AND keep the resolved window.
+
+    Reporting revival alone would let a closure that flattens the entire
+    hierarchy look perfect, so the resolved-window error against a converged
+    reference is gated alongside it.
+    """
+
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from tools.artifacts.build_recurrence_closure_figure import (
+        measure_revival,
+        resolved_window_error,
+    )
+
+    truncation_revival, _ = measure_revival(64, "truncation")
+    for closure in ("hypercollisions", "reflectionless"):
+        revival, _ = measure_revival(64, closure)
+        error = resolved_window_error(64, closure)
+        assert revival < 0.1 * truncation_revival, (
+            f"{closure}: revival {revival:.4f} is not well below truncation's "
+            f"{truncation_revival:.4f}"
+        )
+        assert error < 0.1, f"{closure}: resolved-window error {error:.3e} too large"

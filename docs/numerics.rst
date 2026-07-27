@@ -1376,12 +1376,15 @@ At :math:`M = 3` the coefficient evaluates to :math:`R_4 = 0.921318`, exactly
 reproducing the Hammett-Perkins three-pole coefficient :math:`\sqrt{8/\pi}/\sqrt3`,
 which is an independent check on the family.
 
-Measured revival of :math:`\lvert g_0 \rvert` on the free-streaming hierarchy
-after :math:`t_{\mathrm{rec}}`, from an initial amplitude of 1.0 (hypercollisions
-normalized per the GX Appendix B convention, without which the comparison is
-meaningless):
+Measured on the free-streaming hierarchy at :math:`k_\parallel v_{ti}=1`, from an
+initial :math:`\lvert g_0 \rvert = 1`. Two metrics are reported because the first
+one alone is misleading: revival suppression rewards *any* strong damping, so a
+closure that flattens the whole hierarchy would score perfectly on it. The second
+column charges for perturbing physics that is still resolved, measured against a
+converged :math:`M = 1024` run over :math:`t < t_{\mathrm{rec}}`. Hypercollisions
+use the GX Appendix B normalization; without it the comparison is meaningless.
 
-.. list-table::
+.. list-table:: Revived :math:`\lvert g_0 \rvert` / error on the resolved window
    :header-rows: 1
 
    * - :math:`M`
@@ -1389,26 +1392,38 @@ meaningless):
      - hypercollisions
      - reflectionless
    * - 16
-     - 8.567
-     - 0.0366
-     - 0.1462
+     - 0.9987 / 1.0
+     - 0.0009 / 8.5e-4
+     - 0.0398 / 4.0e-2
    * - 32
-     - 16.25
-     - 0.0829
-     - 0.0931
+     - 0.9994 / 1.0
+     - 0.0003 / 2.7e-4
+     - 0.0277 / 2.8e-2
    * - 64
-     - 14.28
-     - 0.0638
-     - 0.0756
+     - 0.9997 / 1.0
+     - 0.0002 / 2.0e-4
+     - 0.0194 / 1.9e-2
    * - 128
-     - 12.26
-     - 0.0552
-     - 0.0502
+     - 0.9998 / 1.0
+     - 0.00002 / 4.9e-5
+     - 0.0136 / 1.4e-2
 
-A hard truncation returns *more* free energy than was present initially. The two
-absorbing treatments are comparable to each other -- hypercollisions lead at low
-:math:`M`, the closure crosses over near :math:`M = 128` -- and either improves
-on a reflecting termination by roughly two orders of magnitude.
+A hard truncation returns the pulse **essentially intact**: free streaming is
+anti-Hermitian, so :math:`\lVert g \rVert` is conserved and :math:`\lvert g_0
+\rvert` can never exceed its initial value -- the reflection is as complete as
+that bound allows, and the closure supplies no dissipation at all.
+
+On these measurements a hypercollision at the GX normalization **outperforms the
+reflectionless closure on both metrics**. The closure's merits are structural
+rather than numerical: it carries no free parameter, and it is confined to
+:math:`m = M`, so it cannot bias resolved moments the way a band operator can.
+It is not a drop-in improvement on a well-tuned hypercollision.
+
+.. figure:: _static/recurrence_hermite_closure.png
+   :width: 100%
+
+   Recurrence and the two absorbing treatments. Panel (d) shows
+   :math:`R_{M+1}\to1`, i.e. absorption that becomes exact with resolution.
 
 The closure is selected through the Python API,
 ``linked_streaming_contribution(..., hermite_closure="reflectionless")``;
