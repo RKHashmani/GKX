@@ -217,8 +217,8 @@ def main(argv: list[str] | None = None) -> int:
         dk_test, dk_field = (
             np.asarray(matrix, dtype=float)
             for matrix in coulomb_drift_kinetic_moment_matrices(
-                MAXIMUM_HERMITE_ORDER,
-                MAXIMUM_LAGUERRE_ORDER,
+                args.hermite,
+                args.laguerre,
                 1.0,
                 1.0,
                 digits=args.digits,
