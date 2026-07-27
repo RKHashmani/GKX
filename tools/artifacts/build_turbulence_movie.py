@@ -43,6 +43,30 @@ from gkx.workflows.runtime.startup import (  # noqa: E402
 from gkx.workflows.runtime.toml import load_runtime_from_toml  # noqa: E402
 
 
+def _check_healthy(phi: np.ndarray, where: str, ceiling: float) -> None:
+    """Abort on a run that has gone numerically unstable.
+
+    ``integrate_nonlinear_cached`` takes a fixed dt and does not enforce the CFL
+    condition the adaptive runtime path applies, so a dt that is fine during the
+    linear phase can go unstable once the nonlinearity bites. Without this check
+    the failure surfaces as a movie of amplified noise, or as NaN written to a
+    snapshot file 40 minutes later.
+    """
+
+    peak = float(np.abs(phi).max()) if phi.size else 0.0
+    if not np.isfinite(phi).all():
+        raise RuntimeError(
+            f"{where}: solution contains non-finite values -- the timestep "
+            "violates the CFL condition for this grid. Reduce --dt."
+        )
+    if peak > ceiling:
+        raise RuntimeError(
+            f"{where}: max|phi| = {peak:.3e} exceeds the sanity ceiling "
+            f"{ceiling:.3e}. Saturated ITG turbulence is order 0.1-1, so this "
+            "is a numerical blow-up, not physics. Reduce --dt."
+        )
+
+
 #: Spin-up chunk size. Bounds peak memory: the integrator scans over steps and
 #: stacks per-step fields, so one long call allocates proportionally to it.
 _SPINUP_CHUNK = 100
@@ -254,6 +278,7 @@ def run(
     nx: int | None = None,
     ny: int | None = None,
     nz: int | None = None,
+    ceiling: float = 50.0,
 ) -> int:
     cfg, _ = load_runtime_from_toml(config)
     geometry = build_runtime_geometry(cfg)
@@ -326,11 +351,11 @@ def run(
             state = result[0] if isinstance(result, tuple) else result
             done += chunk
             if done % (10 * _SPINUP_CHUNK) == 0 or done == spinup_steps:
-                peak = float(
-                    np.abs(potential_real_space(state, cache, params, cfg)).max()
-                )
+                probe = potential_real_space(state, cache, params, cfg)
+                _check_healthy(probe, f"spin-up step {done}", ceiling)
                 print(
-                    f"  spin-up {done}/{spinup_steps}  max|phi| = {peak:.4e}",
+                    f"  spin-up {done}/{spinup_steps}  "
+                    f"max|phi| = {float(np.abs(probe).max()):.4e}",
                     flush=True,
                 )
 
@@ -352,6 +377,7 @@ def run(
             )
             state = result[0] if isinstance(result, tuple) else result
             phi = potential_real_space(state, cache, params, cfg)
+            _check_healthy(phi, f"frame {index + 1}", ceiling)
             frames_out.append(phi.astype(np.float32))
             print(
                 f"frame {index + 1}/{frames}  max|phi| = {np.abs(phi).max():.4e}",
@@ -392,6 +418,7 @@ def run(
         )
         state = result[0] if isinstance(result, tuple) else result
         phi = potential_real_space(state, cache, params, cfg)
+        _check_healthy(phi, f"frame {index + 1}", ceiling)
 
         magnitude = float(np.abs(phi).max())
         if scale is None or index < frames // 4:
@@ -521,6 +548,12 @@ def main() -> int:
     parser.add_argument("--amplitude", type=float, default=1.0e-3)
     parser.add_argument("--laguerre", type=int, default=None)
     parser.add_argument("--hermite", type=int, default=None)
+    parser.add_argument(
+        "--ceiling",
+        type=float,
+        default=50.0,
+        help="abort if max|phi| exceeds this; saturated ITG is order 0.1-1",
+    )
     parser.add_argument("--nx", type=int, default=None)
     parser.add_argument("--ny", type=int, default=None)
     parser.add_argument("--nz", type=int, default=None)
@@ -579,6 +612,7 @@ def main() -> int:
         nx=args.nx,
         ny=args.ny,
         nz=args.nz,
+        ceiling=args.ceiling,
     )
 
 
