@@ -19,6 +19,7 @@ with a snapshot callback inside it.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 from pathlib import Path
 import subprocess
 import sys
@@ -245,6 +246,9 @@ def run(
     frames_only: bool = False,
     snapshots: Path | None = None,
     spinup_steps: int = 0,
+    nx: int | None = None,
+    ny: int | None = None,
+    nz: int | None = None,
 ) -> int:
     cfg, _ = load_runtime_from_toml(config)
     geometry = build_runtime_geometry(cfg)
@@ -254,7 +258,20 @@ def run(
     from gkx.operators.linear.cache_builder import build_linear_cache
     from gkx.workflows.runtime.startup import _resolve_runtime_hl_dims
 
-    grid = build_spectral_grid(cfg.grid)
+    # Movie-only grid overrides. The shipped stellarator configs run 96x96x48,
+    # which is a production transport resolution and needs more memory than a
+    # shared GPU can spare; a visualization does not. Any override is recorded
+    # in the snapshot so a frame can never be mistaken for a production run.
+    grid_cfg = cfg.grid
+    overrides = {
+        key: value
+        for key, value in (("Nx", nx), ("Ny", ny), ("Nz", nz))
+        if value is not None
+    }
+    if overrides:
+        grid_cfg = dataclasses.replace(grid_cfg, **overrides)
+        print(f"grid override: {overrides}", flush=True)
+    grid = build_spectral_grid(grid_cfg)
     nl, nm = _resolve_runtime_hl_dims(cfg, Nl=laguerre, Nm=hermite)
     cache = build_linear_cache(grid, geometry, params, nl, nm)
     step = float(dt if dt is not None else cfg.time.dt)
@@ -325,6 +342,9 @@ def run(
             epsilon=float(getattr(geometry, "epsilon", 0.18) or 0.18),
             major_radius=float(getattr(geometry, "R0", 3.0) or 3.0),
             nfp=int(getattr(geometry, "nfp", 1) or 1),
+            resolution=np.array(
+                [grid.kx.size, grid.ky.size, grid.z.size, nl, nm], dtype=np.int32
+            ),
         )
         print(f"wrote {snapshots}")
         return 0
@@ -470,6 +490,9 @@ def main() -> int:
     parser.add_argument("--amplitude", type=float, default=1.0e-3)
     parser.add_argument("--laguerre", type=int, default=None)
     parser.add_argument("--hermite", type=int, default=None)
+    parser.add_argument("--nx", type=int, default=None)
+    parser.add_argument("--ny", type=int, default=None)
+    parser.add_argument("--nz", type=int, default=None)
     parser.add_argument(
         "--spinup-steps",
         type=int,
@@ -522,6 +545,9 @@ def main() -> int:
         frames_only=args.frames_only,
         snapshots=args.snapshots,
         spinup_steps=args.spinup_steps,
+        nx=args.nx,
+        ny=args.ny,
+        nz=args.nz,
     )
 
 
