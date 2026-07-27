@@ -43,6 +43,11 @@ from gkx.workflows.runtime.startup import (  # noqa: E402
 from gkx.workflows.runtime.toml import load_runtime_from_toml  # noqa: E402
 
 
+#: Spin-up chunk size. Bounds peak memory: the integrator scans over steps and
+#: stacks per-step fields, so one long call allocates proportionally to it.
+_SPINUP_CHUNK = 100
+
+
 def _species_arrays(cfg) -> dict[str, jnp.ndarray]:
     """Per-species arrays ``solve_fields`` needs, in config order."""
 
@@ -301,19 +306,33 @@ def run(
     if spinup_steps > 0:
         # Advance through the linear growth phase without recording. A movie
         # that spends its length on exponential growth is showing an
-        # instability, not turbulence; the interesting state is the saturated
-        # one, and reaching it costs the same either way. Recording only after
-        # spin-up spends the frames where the physics is.
+        # instability, not turbulence; reaching saturation costs the same GPU
+        # time either way, so recording only afterwards spends every frame
+        # where the physics is.
+        #
+        # Chunked, because integrate_nonlinear_cached scans over steps and
+        # stacks the per-step field history: one 12000-step call asked for
+        # 9.4 GB and died. Memory is bounded by the chunk, not the spin-up.
         print(
             f"spin-up: {spinup_steps} steps to t = {spinup_steps * step:.1f}",
             flush=True,
         )
-        result = integrate_nonlinear_cached(
-            state, cache, params, step, spinup_steps, method="rk4"
-        )
-        state = result[0] if isinstance(result, tuple) else result
-        peak = float(np.abs(potential_real_space(state, cache, params, cfg)).max())
-        print(f"spin-up done, max|phi| = {peak:.4e}", flush=True)
+        done = 0
+        while done < spinup_steps:
+            chunk = min(_SPINUP_CHUNK, spinup_steps - done)
+            result = integrate_nonlinear_cached(
+                state, cache, params, step, chunk, method="rk4", return_fields=False
+            )
+            state = result[0] if isinstance(result, tuple) else result
+            done += chunk
+            if done % (10 * _SPINUP_CHUNK) == 0 or done == spinup_steps:
+                peak = float(
+                    np.abs(potential_real_space(state, cache, params, cfg)).max()
+                )
+                print(
+                    f"  spin-up {done}/{spinup_steps}  max|phi| = {peak:.4e}",
+                    flush=True,
+                )
 
     if snapshots is not None:
         # Compute-only pass. Rendering is matplotlib on the CPU and takes far
@@ -323,7 +342,13 @@ def run(
         frames_out = []
         for index in range(frames):
             result = integrate_nonlinear_cached(
-                state, cache, params, step, steps_per_frame, method="rk4"
+                state,
+                cache,
+                params,
+                step,
+                steps_per_frame,
+                method="rk4",
+                return_fields=False,
             )
             state = result[0] if isinstance(result, tuple) else result
             phi = potential_real_space(state, cache, params, cfg)
@@ -357,7 +382,13 @@ def run(
     written: list[Path] = []
     for index in range(frames):
         result = integrate_nonlinear_cached(
-            state, cache, params, step, steps_per_frame, method="rk4"
+            state,
+            cache,
+            params,
+            step,
+            steps_per_frame,
+            method="rk4",
+            return_fields=False,
         )
         state = result[0] if isinstance(result, tuple) else result
         phi = potential_real_space(state, cache, params, cfg)
