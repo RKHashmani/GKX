@@ -38,6 +38,60 @@ DESC, SIMSOPT, TORAX, Equinox, and Lineax
   typed PyTrees, exact or validated derivatives, objective APIs, solver
   adapters, persistent compilation-cache workflows, and optimization examples.
 
+Capability comparison
+---------------------
+
+The table records *scope of implementation* for orientation, not a judgement of
+quality: each of these codes is mature and each is stronger than GKX in areas
+GKX does not attempt. It is included because the collision-operator scope in
+particular is what motivates several GKX design choices.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 26 26 24 24
+
+   * - 
+     - GKX
+     - GX [GX]_
+     - GENE [GENE]_
+   * - Velocity representation
+     - Hermite-Laguerre gyro-moments
+     - Hermite-Laguerre gyro-moments
+     - grid in :math:`(v_\parallel, \mu)`
+   * - Collision models
+     - Lenard-Bernstein/Dougherty, Sugama, improved Sugama, drift-kinetic
+       Coulomb, gyrokinetic Coulomb
+     - Dougherty plus hypercollisions
+     - Landau and model operators
+   * - Perpendicular treatment
+     - Fourier, with finite-Larmor Coulomb tables in :math:`k_\perp`
+     - Fourier
+     - Fourier
+   * - Differentiability
+     - JAX autodiff end to end, including an implicit eigenvalue adjoint
+     - not a design goal
+     - not a design goal
+   * - Geometry
+     - analytic s-alpha, Miller, imported VMEC, differentiable VMEC/Boozer
+     - analytic, Miller, VMEC
+     - analytic, Miller, VMEC, and more
+   * - Hardware
+     - CPU and GPU through JAX
+     - GPU-native
+     - CPU and GPU
+
+Two entries deserve qualification. The collision row counts *selectable models*,
+not fidelity: a Dougherty operator that is well converged can be a better
+physical answer than a Coulomb operator that is not, and Hoffmann, Frei & Ricci
+(2023) found the choice of collision model has little effect on the ITG growth
+rate and saturated heat flux at tokamak-relevant collisionality. The
+differentiability row is a statement about design intent rather than a
+deficiency, since both other codes predate the current autodiff tooling.
+
+GKX's velocity representation is deliberately the same family as GX, which is
+what makes GX the closest parity reference; the differences that matter for
+verification are the collision hierarchy and the differentiable geometry path.
+
 How references are used
 -----------------------
 
