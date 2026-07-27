@@ -2818,6 +2818,39 @@ next_tests = [
 ]
 
 [[modules]]
+module = "gkx.artifacts.figure_style"
+path = "src/gkx/artifacts/figure_style.py"
+owner_lane = "single house style for every generated README and documentation figure"
+status = "active"
+coverage_priority = "low"
+coverage_target_percent = 95.0
+reference_anchors = [
+  "Okabe & Ito (2008) colour-blind safe qualitative palette",
+  "README/docs validation figure stack",
+]
+physics_contracts = [
+  "every published/analytic reference is drawn in one fixed style so it is never mistaken for data",
+  "annotate_reference keeps the literature anchor inside the figure, so a panel lifted into a slide carries its source",
+]
+numerics_contracts = [
+  "style is applied through rc_context, so importing the module never mutates a user's global matplotlib state",
+  "palette ordering is monotone in luminance and survives greyscale printing",
+  "font sizes, dpi, and export settings are deterministic across every generated figure",
+]
+fast_tests = [
+  "tests/unit/diagnostics/test_plotting.py",
+]
+artifact_paths = [
+  "docs/_static/landau_damping_validation.png",
+  "docs/_static/recurrence_hermite_closure.png",
+  "docs/_static/benchmark_linear_parity.png",
+  "docs/_static/runtime_memory_benchmark.png",
+]
+next_tests = [
+  "assert rc_context leaves rcParams unchanged after the context exits",
+]
+
+[[modules]]
 module = "gkx.artifacts.plotting"
 path = "src/gkx/artifacts/plotting.py"
 owner_lane = "publication plotting for benchmarks, diagnostics, saved outputs, and public style"
