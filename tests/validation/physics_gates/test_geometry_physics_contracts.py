@@ -206,3 +206,68 @@ def test_electromagnetic_zonal_solve_is_continuous_in_beta() -> None:
 
     # Finite beta must still do something physical rather than nothing.
     assert np.abs(zonal_potential(1.0e-2)[..., 0, 1, :]).max() / zonal_es < 0.99
+
+
+def test_reference_electrostatic_solve_matches_production_including_zonal() -> None:
+    """The reference field solve must reproduce production at ``ky = 0`` too.
+
+    The existing equivalence test builds its fixture with ``Nx = 1``, which
+    makes the ``kx > 0`` mask empty, so the zonal branch is never exercised and
+    both implementations trivially return ``nbar/q_phi``. With ``Nx > 1`` the
+    reference path returned 0.22 times the production zonal potential while
+    agreeing exactly everywhere else.
+    """
+
+    from gkx.parallel.velocity_drive import electrostatic_phi_reference
+    from gkx.terms.fields import solve_fields
+
+    grid = build_spectral_grid(
+        GridConfig(Nx=5, Ny=2, Nz=16, Lx=40.0, Ly=40.0, boundary="periodic")
+    )
+    geometry = SAlphaGeometry.from_config(
+        GeometryConfig(q=1.4, s_hat=0.8, epsilon=0.18, R0=2.78)
+    )
+    assert grid.kx.size > 1, "the fixture must expose a nonzero kx to be meaningful"
+
+    generator = np.random.default_rng(1)
+    shape = (1, 4, 4, grid.ky.size, grid.kx.size, grid.z.size)
+    state = jnp.asarray(
+        generator.normal(size=shape) * 1.0e-3
+        + 1j * generator.normal(size=shape) * 1.0e-3
+    )
+    unit = jnp.asarray([1.0])
+    params = linear_params_for_geometry(geometry, tau_e=1.0)
+    cache = build_linear_cache(grid, geometry, params, 4, 4)
+
+    production = np.asarray(
+        solve_fields(
+            state,
+            cache,
+            params,
+            charge=unit,
+            density=unit,
+            temp=unit,
+            mass=unit,
+            tz=unit,
+            vth=unit,
+            fapar=jnp.asarray(0.0),
+            w_bpar=jnp.asarray(0.0),
+        ).phi
+    )
+    reference = np.asarray(
+        electrostatic_phi_reference(
+            state,
+            Jl=cache.Jl,
+            tau_e=params.tau_e,
+            charge=unit,
+            density=unit,
+            tz=unit,
+            mask0=cache.mask0,
+            jacobian=cache.jacobian,
+            ky=cache.ky,
+        )
+    )
+
+    zonal = np.abs(production[..., 0, 1, :]).max()
+    assert zonal > 0.0, "the zonal mode must carry signal for this test to bite"
+    assert np.abs(reference - production).max() < 1.0e-12 * np.abs(production).max()
