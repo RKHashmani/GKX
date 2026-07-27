@@ -245,6 +245,7 @@ def run(
     amplitude: float = 1.0e-3,
     laguerre: int | None = None,
     hermite: int | None = None,
+    frames_only: bool = False,
 ) -> int:
     cfg, _ = load_runtime_from_toml(config)
     geometry = build_runtime_geometry(cfg)
@@ -313,6 +314,12 @@ def run(
         written.append(frame_path)
         print(f"frame {index + 1}/{frames}  max|phi| = {magnitude:.4e}", flush=True)
 
+    if frames_only:
+        # Rendering hosts do not always have ffmpeg; frames rsync fine and
+        # encode anywhere.
+        print(f"wrote {len(written)} frames to {frame_dir}")
+        return 0
+
     encode = subprocess.run(
         [
             "ffmpeg",
@@ -359,6 +366,11 @@ def main() -> int:
     parser.add_argument("--amplitude", type=float, default=1.0e-3)
     parser.add_argument("--laguerre", type=int, default=None)
     parser.add_argument("--hermite", type=int, default=None)
+    parser.add_argument(
+        "--frames-only",
+        action="store_true",
+        help="render PNG frames and skip ffmpeg encoding",
+    )
     args = parser.parse_args()
 
     return run(
@@ -373,6 +385,7 @@ def main() -> int:
         amplitude=args.amplitude,
         laguerre=args.laguerre,
         hermite=args.hermite,
+        frames_only=args.frames_only,
     )
 
 
