@@ -39,6 +39,7 @@ from gkx.terms.fields import solve_fields  # noqa: E402
 from gkx.workflows.runtime.startup import (  # noqa: E402
     build_runtime_geometry,
     build_runtime_linear_params,
+    build_runtime_term_config,
 )
 from gkx.workflows.runtime.toml import load_runtime_from_toml  # noqa: E402
 
@@ -283,6 +284,16 @@ def run(
     cfg, _ = load_runtime_from_toml(config)
     geometry = build_runtime_geometry(cfg)
     params = build_runtime_linear_params(cfg, geom=geometry)
+    # Must come from the config. TermConfig() defaults to nonlinear = 0.0 and
+    # hyperdiffusion = 0.0, so omitting this runs a LINEAR case with no
+    # small-scale dissipation: the ITG mode then grows exponentially forever,
+    # which is what the earlier blow-ups actually were. No timestep can bound
+    # a linear instability, which is why halving dt only delayed them.
+    terms = build_runtime_term_config(cfg)
+    if float(terms.nonlinear) == 0.0:
+        raise ValueError(
+            f"{config} sets [terms] nonlinear = 0.0; there is no turbulence to film"
+        )
 
     from gkx.core.grid import build_spectral_grid
     from gkx.operators.linear.cache_builder import build_linear_cache
@@ -346,7 +357,14 @@ def run(
         while done < spinup_steps:
             chunk = min(_SPINUP_CHUNK, spinup_steps - done)
             result = integrate_nonlinear_cached(
-                state, cache, params, step, chunk, method="rk4", return_fields=False
+                state,
+                cache,
+                params,
+                step,
+                chunk,
+                method="rk4",
+                terms=terms,
+                return_fields=False,
             )
             state = result[0] if isinstance(result, tuple) else result
             done += chunk
@@ -373,6 +391,7 @@ def run(
                 step,
                 steps_per_frame,
                 method="rk4",
+                terms=terms,
                 return_fields=False,
             )
             state = result[0] if isinstance(result, tuple) else result
@@ -414,6 +433,7 @@ def run(
             step,
             steps_per_frame,
             method="rk4",
+            terms=terms,
             return_fields=False,
         )
         state = result[0] if isinstance(result, tuple) else result
