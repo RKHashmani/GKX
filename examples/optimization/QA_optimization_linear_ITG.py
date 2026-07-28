@@ -54,7 +54,22 @@ N_LAGUERRE = 2
 N_HERMITE = 3
 R_OVER_LT = 6.9
 R_OVER_LN = 2.2
-TRANSPORT_WEIGHT = 0.01
+# Transport priority relative to quasisymmetry, applied to the SEED-NORMALIZED
+# residual below. At the old raw weight of 0.01 the transport term was 0.00% of
+# the objective (iota 94.4%, aspect 5.4%, quasisymmetry 0.2%), so the optimizer
+# never saw the turbulence -- which is why these runs showed no transport
+# reduction. Measured trade-off from tools/artifacts/build_qa_transport_weight_scan.py:
+#
+#   weight   quasisymmetry/seed   heat flux/seed
+#   0.01           0.14                0.38
+#   0.5            0.24                0.29
+#   2.0            0.67                0.07     <- default
+#   8.0            stalled (iota never left 0)
+#
+# 2.0 buys a 93% flux reduction while quasisymmetry stays 33% better than the
+# seed. Above ~4 the least-squares solver stalls on the finite-difference
+# gradient of the proxy; raise it only with an analytic Jacobian.
+TRANSPORT_PRIORITY = 2.0
 
 inp = vj.VmecInput.from_file(INPUT_FILE)
 rbc, zbs = inp.rbc.copy(), inp.zbs.copy()
@@ -96,6 +111,10 @@ def report(tag, equilibrium):
 
 
 gamma_seed = report("seed", eq)
+# Scale the priority by the seed value so the knob above means "relative to
+# quasisymmetry" instead of inheriting the residual's arbitrary magnitude.
+TRANSPORT_WEIGHT = TRANSPORT_PRIORITY / max(abs(gamma_seed), 1.0e-12)
+
 objective_terms = [
     (qs, 0.0, 1.0),
     (opt.aspect_ratio, ASPECT_TARGET, 1.0),
