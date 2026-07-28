@@ -29,14 +29,35 @@ whose cost is O(n^2 k) with k Krylov vectors rather than O(n^3), and whose
 memory is O(n k) rather than O(n^2). Measured here it is already 7.9x faster at
 n = 2560, with the advantage growing as n^3 / (n^2 k) = n / k.
 
-**The two are not yet interchangeable, and this artifact records why rather than
-asserting a speedup.** ``dominant_eigenpair`` selects a physical branch through
-``mode_family``, the ``omega_*`` filters and a fallback chain; the dense path
-takes a plain ``argmax(Re lambda)``. Compared directly they disagree by 2.6% to
-270% depending on resolution -- not Krylov failing to converge, but the two
-answering different questions. Substituting one for the other therefore requires
-matching the selection criterion first, and validating branch-by-branch, before
-any speedup can be claimed.
+**Why the obvious substitution does not work, measured rather than guessed.**
+The matrix-free RHS and the dense matrix agree to 3e-16 on the same vector, so
+the operator is not in question. The spectrum is:
+
+    max Re lambda    =   0.143     <- the wanted eigenvalue
+    max |Im lambda|  =  80.15
+    spectral radius  =  80.15
+
+The target is an INTERIOR eigenvalue: its real part is ~560x smaller than the
+spectral radius, which is dominated by fast oscillatory (large-|Im|) modes.
+Plain Arnoldi converges to extremal |lambda| and therefore finds the |lambda| ~
+80 modes, not this one -- measured values came back 30x to 300x too large and did
+not improve with krylov_dim, which is the signature of converging to the wrong
+part of the spectrum rather than of under-convergence.
+
+The propagator variant maps max-Re to max-|mu| via mu = exp(lambda dt), but only
+while |Im lambda| dt << pi. Here |Im lambda| = 80, so power_dt = 0.05 gives 4.0
+and aliases badly; a dt small enough to avoid aliasing leaves a per-step growth
+separation of exp(0.143 dt) ~ 1.0014, which converges far too slowly to be
+useful.
+
+So the dense eigensolve is not simply a missed optimization -- it is the
+straightforward way to reach an interior eigenvalue, and that is presumably why
+it is there. The correct fast algorithm is **shift-invert Arnoldi** with a shift
+near the expected growth rate, where each iteration applies (A - sigma I)^-1
+matrix-free via GMRES. GKX already carries the scaffolding for this
+(shift_source, shift_solve_method, shift_preconditioner), so the work is to make
+that path reach the same eigenvalue as the dense reference, not to build a new
+solver.
 
 Two further notes for whoever picks this up:
 
@@ -208,9 +229,12 @@ def main() -> int:
         "measurements": rows,
         "projections": projections,
         "note": (
-            "krylov and dense disagree because dominant_eigenpair selects a "
-            "physical branch while the dense path takes argmax(Re lambda); "
-            "matching the selection is a prerequisite to any substitution"
+            "the wanted eigenvalue is INTERIOR: max Re = 0.143 against a "
+            "spectral radius of 80.15, so plain Arnoldi converges to the "
+            "oscillatory extremes instead. Matrix-free and dense operators "
+            "agree to 3e-16, so this is a spectrum-structure problem, not an "
+            "operator mismatch. Shift-invert Arnoldi with a matrix-free GMRES "
+            "inner solve is the correct fast algorithm."
         ),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
