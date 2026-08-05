@@ -52,6 +52,20 @@ def _check_healthy(phi: np.ndarray, where: str, ceiling: float) -> None:
     linear phase can go unstable once the nonlinearity bites. Without this check
     the failure surfaces as a movie of amplified noise, or as NaN written to a
     snapshot file 40 minutes later.
+
+    The ceiling is calibrated against a measurement, not an assumption. An
+    earlier version asserted that "saturated ITG turbulence is order 0.1-1" and
+    aborted above 50, which is wrong for this normalization by two orders of
+    magnitude: a state that passes every saturation check in
+    ``tools/campaigns/nonlinear_saturated_state.py`` -- tau_ac 8.92, window 22.4
+    tau_ac, late drift 1.6% -- has max|phi| = 137.7. That guard fired on correct
+    physics and aborted three otherwise healthy runs partway up the linear phase.
+
+    The mismatch had a cause worth stating: the shipped TOML sets
+    diagnostic_norm = "rho_star", so this quantity is the rho-star-normalized
+    potential. "Order 0.1 to 1" is right for ephi/T_i and wrong for
+    (ephi/T_i)/rho_star by a factor 1/rho_star -- the ceiling and the field were
+    two different quantities.
     """
 
     peak = float(np.abs(phi).max()) if phi.size else 0.0
@@ -59,12 +73,19 @@ def _check_healthy(phi: np.ndarray, where: str, ceiling: float) -> None:
         raise RuntimeError(
             f"{where}: solution contains non-finite values -- the timestep "
             "violates the CFL condition for this grid. Reduce --dt."
+            " If the run was merely approaching saturation, raise --ceiling "
+            "instead: measure the saturated amplitude rather than assuming it."
         )
     if peak > ceiling:
         raise RuntimeError(
             f"{where}: max|phi| = {peak:.3e} exceeds the sanity ceiling "
-            f"{ceiling:.3e}. Saturated ITG turbulence is order 0.1-1, so this "
-            "is a numerical blow-up, not physics. Reduce --dt."
+            f"{ceiling:.3e}. Raise --ceiling if this case genuinely saturates "
+            "higher -- measure it with "
+            "tools/campaigns/nonlinear_saturated_state.py rather than guessing. "
+            "A verified-saturated Cyclone state has max|phi| = 137.7, so a "
+            "ceiling near 50 aborts healthy runs. Reducing --dt is usually the "
+            "wrong lever: this case ran stably under the adaptive stepper at "
+            "dt = 0.031, larger than fixed steps that appeared to fail."
         )
 
 
@@ -199,7 +220,11 @@ def render_frame(
         ax.set_title("Perpendicular cut at the outboard midplane")
         ax.grid(False)
         bar = fig.colorbar(mesh, ax=ax, fraction=0.046, pad=0.03)
-        bar.set_label(r"$e\phi/T_i$")
+        # The shipped nonlinear TOML sets diagnostic_norm = "rho_star", so the
+        # field carried here is the rho-star-normalized potential, not ephi/T_i.
+        # Labelling it ephi/T_i overstates the amplitude by 1/rho_star and is
+        # what made a physically saturated run look like a blow-up.
+        bar.set_label(r"$(e\phi/T_i)\,/\,\rho_*$")
 
         # ---- field-aligned tube -------------------------------------------
         ax3d = fig.add_subplot(grid[0, 1], projection="3d")
@@ -279,7 +304,10 @@ def run(
     nx: int | None = None,
     ny: int | None = None,
     nz: int | None = None,
-    ceiling: float = 50.0,
+    # Measured against a state that passes every saturation check (max|phi| =
+    # 137.7 at 16^3), with room for the overshoot a fixed-step run shows on the
+    # way into saturation. A genuine numerical blow-up leaves this far behind.
+    ceiling: float = 1.0e3,
 ) -> int:
     cfg, _ = load_runtime_from_toml(config)
     geometry = build_runtime_geometry(cfg)
@@ -571,8 +599,10 @@ def main() -> int:
     parser.add_argument(
         "--ceiling",
         type=float,
-        default=50.0,
-        help="abort if max|phi| exceeds this; saturated ITG is order 0.1-1",
+        default=1.0e3,
+        help="abort if max|phi| exceeds this. Calibrated against a state that "
+        "passes every check in tools/campaigns/nonlinear_saturated_state.py, "
+        "which has max|phi| = 137.7 -- not against an assumed order of magnitude",
     )
     parser.add_argument("--nx", type=int, default=None)
     parser.add_argument("--ny", type=int, default=None)
