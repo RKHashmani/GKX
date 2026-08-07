@@ -44,6 +44,7 @@ the same order they appear in the code.
    linear_model
    operators
    numerics
+   differentiable_eigensolver
    parallelization
    normalization
    quasilinear
@@ -52,6 +53,8 @@ the same order they appear in the code.
    algorithms
    solvers
    research_grade_program
+   research_grade_plan
+   solvax_defaults
    nonlinear_gradient_plan
    architecture
    benchmarks

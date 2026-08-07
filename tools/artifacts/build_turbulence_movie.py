@@ -35,6 +35,9 @@ from gkx.artifacts.figure_style import figure_style, save_figure  # noqa: E402
 from gkx.solvers.nonlinear.state_integration import (  # noqa: E402
     integrate_nonlinear_cached,
 )
+from gkx.operators.nonlinear.projection import (  # noqa: E402
+    _make_nonlinear_state_projector,
+)
 from gkx.terms.fields import solve_fields  # noqa: E402
 from gkx.workflows.runtime.startup import (  # noqa: E402
     build_runtime_geometry,
@@ -367,6 +370,21 @@ def run(
         .set(jnp.asarray(spectral_seed, dtype=complex_dtype))
     )
 
+    # The production runtime applies this after every step; integrate_nonlinear_cached
+    # does not. It is nearly a no-op here because the seed is generated in real
+    # space and is already Hermitian, so it was not what fixed the blow-up -- but
+    # production applies it and a run that drifts off the constraint should be
+    # corrected rather than left to grow.
+    project_state = _make_nonlinear_state_projector(
+        state,
+        ky_vals=np.asarray(grid.ky),
+        nx=int(grid.kx.size),
+        compressed_real_fft=bool(cfg.time.compressed_real_fft),
+        fixed_mode_ky_index=None,
+        fixed_mode_kx_index=None,
+    )
+    state = project_state(state)
+
     if spinup_steps > 0:
         # Advance through the linear growth phase without recording. A movie
         # that spends its length on exponential growth is showing an
@@ -394,7 +412,7 @@ def run(
                 terms=terms,
                 return_fields=False,
             )
-            state = result[0] if isinstance(result, tuple) else result
+            state = project_state(result[0] if isinstance(result, tuple) else result)
             done += chunk
             if done % (10 * _SPINUP_CHUNK) == 0 or done == spinup_steps:
                 probe = potential_real_space(state, cache, params, cfg)
@@ -422,7 +440,7 @@ def run(
                 terms=terms,
                 return_fields=False,
             )
-            state = result[0] if isinstance(result, tuple) else result
+            state = project_state(result[0] if isinstance(result, tuple) else result)
             phi = potential_real_space(state, cache, params, cfg)
             _check_healthy(phi, f"frame {index + 1}", ceiling)
             frames_out.append(phi.astype(np.float32))
@@ -464,7 +482,7 @@ def run(
             terms=terms,
             return_fields=False,
         )
-        state = result[0] if isinstance(result, tuple) else result
+        state = project_state(result[0] if isinstance(result, tuple) else result)
         phi = potential_real_space(state, cache, params, cfg)
         _check_healthy(phi, f"frame {index + 1}", ceiling)
 
