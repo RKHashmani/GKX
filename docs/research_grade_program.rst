@@ -116,6 +116,58 @@ saturated rather than merely long. This is the only test in the program that
 exercises zonal drive, Landau damping and saturation simultaneously, which is
 why it is worth more than its cost.
 
+*Linear end: measured, and not yet converged.*
+``tools/campaigns/dimits_shift.py`` puts the Cyclone linear ITG threshold at
+:math:`0.5613\times` the shipped drive at the case's own resolution
+(:math:`N_\ell = 4`, :math:`N_m = 8`), set by :math:`k_y` index 3 --
+:math:`k_y\rho_i = 0.300`, which is the Cyclone most-unstable wavenumber, an
+independent sign that the right mode is being followed. The sign change brackets
+to :math:`[0.5583, 0.5656]` with the fitted root inside it at relative residual
+0.053, and four of five wavenumbers pass both checks. Artifact:
+``docs/_static/dimits_linear_threshold.json``.
+
+**The number moves with velocity-space resolution, and the apparent agreement
+with literature is a coincidence.** Tracking the same :math:`k_y` branch through
+its crossing gives 0.5623 at :math:`(N_\ell, N_m) = (4, 8)`, 0.5904 at (4, 16)
+and 0.6670 at (8, 16) -- that is :math:`R/L_T` of 3.89, 4.09 and 4.62. Eighteen
+percent between coarsest and finest tried, monotonically upward, still climbing,
+and the Laguerre refinement moves it more than the Hermite one. So 3.89 against
+the Cyclone linear value of about 4.0 is *not* a validation: at (8, 16) the same
+measurement gives 4.62. The machinery is sound; the resolution is not. The
+committed linear comparison (``docs/_static/cyclone_mismatch_table.csv``, 0.6%
+against the reference at :math:`k_y\rho_i = 0.3`) runs :math:`N_\ell = 16`,
+:math:`N_m = 48`, far above anything tried here.
+
+Before the nonlinear scan is worth GPU time the threshold has to be run up the
+:math:`(N_\ell, N_m)` ladder until it stops moving. Dense ``eigvals`` will not
+reach (16, 48) -- :math:`n = 18432` -- so this is a use for the matrix-free
+shift-invert solver from #23, with the previous eigenvalue as the shift, which is
+exactly the continuation this tool already performs.
+
+Three findings came out of getting there, and the first two are not local to
+this tool:
+
+- **A default term set is a different physics model.** Passing ``terms=None``
+  to the linear objectives takes ``LinearTerms`` defaults, which switch
+  hyperdiffusion off while every shipped TOML switches it on. Without it the
+  Cyclone operator is *unstable* far below threshold, and worse with resolution:
+  :math:`\gamma = 1.2\times10^{-3}` at :math:`N_m=8`,
+  :math:`3.9\times10^{-3}` at 16, :math:`2.2\times10^{-2}` at 32, at
+  :math:`|\omega|` up to 23 and with no dependence on the drive at all. Since
+  the branch selector takes :math:`\mathrm{argmax}\,\mathrm{Re}\,\lambda`, those
+  artifacts are what a growth-rate objective returns wherever the physical mode
+  is stable -- which includes the stellarator optimization objectives, since they
+  pass ``terms=None`` too.
+- **The threshold law here is linear, not square-root.** The square-root law
+  describes a bifurcation where two roots merge; a simple eigenvalue crossing
+  the imaginary axis moves analytically in the parameter. Measured: the linear
+  root lands inside the sign-change bracket for every wavenumber (residuals 0.03
+  to 0.13), the square-root root outside every one (0.13 to 0.21).
+- **A tracked branch supplies its own control.** Following the eigenvalue down
+  from high drive produces the damped side of the curve, so the sign change
+  brackets the root with no model at all, and the fit can be checked against it.
+  Refinement tightens both together.
+
 **A5 -- Nonlinear autodiff.** *Algorithmic.* As previously scoped: production
 heat flux inside the differentiated window, find the divergence knee, measure the
 bias against finite differences, then choose windowed adjoint or NILSS on
