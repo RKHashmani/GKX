@@ -364,10 +364,12 @@ def test_build_shift_invert_preconditioner_modes() -> None:
         v0, cache, params, term_cfg, sigma, None
     )
     assert precond is None and op is None
-    precond, op = lk._build_shift_invert_precond(
-        v0, cache, params, term_cfg, sigma, "unknown"
-    )
-    assert precond is None and op is None
+    # This used to assert that "unknown" returned (None, None), which pinned the
+    # silent-drop behaviour as correct and is why the defect survived: an
+    # unrecognized name disabled preconditioning while the solve reported itself
+    # as preconditioned. Unknown names now raise; see the dedicated cases below.
+    with pytest.raises(ValueError, match="unknown shift-invert preconditioner"):
+        lk._build_shift_invert_precond(v0, cache, params, term_cfg, sigma, "unknown")
 
     precond, op = lk._build_shift_invert_precond(
         v0, cache, params, term_cfg, sigma, "damping"
@@ -1536,3 +1538,135 @@ def test_dominant_eigenpair_reports_shift_invert_status(
     assert any("running shift-invert Arnoldi" in item for item in messages)
     assert any("shift-invert solve finished" in item for item in messages)
     assert any("residual=" in item for item in messages)
+
+
+def test_build_shift_invert_preconditioner_rejects_unknown_mode() -> None:
+    """An unsupported name must raise, not silently disable preconditioning.
+
+    This function used to return ``(None, None)`` for anything outside its
+    whitelist. A benchmark passed ``"auto"`` -- plausible, since three sibling
+    options accept it -- got no preconditioner at all, and published results
+    claiming the physics-aware Hermite-line inverse was active.
+    """
+
+    _grid, cache, params, v0, term_cfg, _terms = _tiny_krylov_setup(linked=False)
+    sigma = jnp.asarray(0.1j, dtype=v0.dtype)
+
+    for mode in ("unknown", "hermitline", "damping-diagonal"):
+        with pytest.raises(ValueError, match="unknown shift-invert preconditioner"):
+            ka._build_shift_invert_precond(v0, cache, params, term_cfg, sigma, mode)
+
+    # "auto" is a real policy resolved by _automatic_shift_preconditioner one
+    # level up, so reaching this function with it means that layer was bypassed.
+    # The message has to say that rather than suggest a substitute: mapping it to
+    # "damping" would hand a damping diagonal to a caller that asked for a
+    # physics-aware line solve.
+    with pytest.raises(ValueError, match="was bypassed"):
+        ka._build_shift_invert_precond(v0, cache, params, term_cfg, sigma, "auto")
+
+
+@pytest.mark.parametrize("mode", sorted(ka.SHIFT_PRECOND_NAMES - {"none"}))
+def test_build_shift_invert_preconditioner_documented_names_resolve(mode: str) -> None:
+    """Every advertised name builds a usable operator.
+
+    Only ``"damping"`` returns a diagonal array; the line and field-corrected
+    variants return ``(None, operator)`` because they are not diagonal. What has
+    to hold for all of them is that an operator comes back and produces finite
+    output -- a name that is accepted but resolves to nothing is the same defect
+    as one that is silently dropped.
+    """
+
+    _grid, cache, params, v0, term_cfg, _terms = _tiny_krylov_setup(linked=False)
+    sigma = jnp.asarray(0.1j, dtype=v0.dtype)
+
+    precond, operator = ka._build_shift_invert_precond(
+        v0, cache, params, term_cfg, sigma, mode
+    )
+
+    assert callable(operator), f"{mode!r} is advertised but resolved to no operator"
+    if mode == "damping":
+        assert precond is not None
+    result = operator(v0.reshape(-1))
+    assert result.shape == (v0.size,)
+    assert bool(jnp.all(jnp.isfinite(jnp.real(result))))
+
+
+def test_build_shift_invert_preconditioner_opt_out_and_normalisation() -> None:
+    """``None``/``"none"`` stay the opt-out; names are case- and space-tolerant."""
+
+    _grid, cache, params, v0, term_cfg, _terms = _tiny_krylov_setup(linked=False)
+    sigma = jnp.asarray(0.1j, dtype=v0.dtype)
+
+    for opt_out in (None, "none", "NONE", " none "):
+        assert ka._build_shift_invert_precond(
+            v0, cache, params, term_cfg, sigma, opt_out
+        ) == (None, None)
+
+    spaced, _ = ka._build_shift_invert_precond(
+        v0, cache, params, term_cfg, sigma, "  DAMPING "
+    )
+    assert spaced is not None
+
+
+def test_line_and_field_preconditioners_are_not_the_damping_diagonal() -> None:
+    """The advertised variants must actually differ from ``"damping"``.
+
+    ``test_..._documented_names_resolve`` only asserts each name yields a usable
+    operator, and on the tiny fixture that is satisfied trivially: with the drift
+    terms zeroed there is nothing but collisional damping, so the Hermite line
+    solve legitimately collapses onto the diagonal and all sixteen names agree to
+    1e-16. A name that resolved to nothing would pass that test.
+
+    So this one uses a cache where parallel streaming matters. Measured on the
+    Cyclone linear case at ``Nl=4, Nm=16``: both variants differ from the damping
+    diagonal by a relative 0.99. If that collapses, a run asking for the
+    physics-aware preconditioner is silently getting the diagonal -- which is the
+    defect the whole name-validation change exists to prevent.
+    """
+
+    from pathlib import Path
+
+    from gkx.core.grid import select_ky_grid
+    from gkx.geometry.flux_tube import sample_flux_tube_geometry
+    from gkx.runtime import (
+        build_runtime_geometry,
+        build_runtime_linear_params,
+        build_runtime_linear_terms,
+    )
+    from gkx.workflows.runtime.toml import load_runtime_from_toml
+
+    runtime, _raw = load_runtime_from_toml(
+        Path("examples/linear/axisymmetric/cyclone.toml")
+    )
+    analytic = build_runtime_geometry(runtime)
+    ntheta = int(runtime.grid.ntheta)
+    theta = jnp.linspace(
+        float(runtime.grid.z_min), float(runtime.grid.z_max), ntheta, endpoint=False
+    )
+    geom = sample_flux_tube_geometry(analytic, theta)
+    n_laguerre, n_hermite = 4, 16
+    params = build_runtime_linear_params(runtime, Nm=n_hermite, geom=analytic)
+    term_cfg = linear_terms_to_term_config(build_runtime_linear_terms(runtime))
+    grid = select_ky_grid(
+        build_spectral_grid(GridConfig(Nx=1, Ny=12, Nz=ntheta, Lx=6.0, Ly=62.83)), 3
+    )
+    cache = build_linear_cache(grid, geom, params, Nl=n_laguerre, Nm=n_hermite)
+    state = jnp.ones(
+        (n_laguerre, n_hermite, 1, 1, grid.z.size), dtype=jnp.complex128
+    ) * (1.0 + 0.1j)
+    sigma = jnp.asarray(0.1j, dtype=state.dtype)
+
+    def applied(mode: str) -> jnp.ndarray:
+        _precond, operator = ka._build_shift_invert_precond(
+            state, cache, params, term_cfg, sigma, mode
+        )
+        return operator(state.reshape(-1))
+
+    reference = applied("damping")
+    scale = float(jnp.max(jnp.abs(reference)))
+    for mode in ("hermite-line", "field-corrected"):
+        relative = float(jnp.max(jnp.abs(applied(mode) - reference))) / scale
+        assert relative > 0.1, (
+            f"{mode!r} is within {relative:.2e} of the damping diagonal on a cache "
+            "where streaming matters, so it is not applying the line solve"
+        )
